@@ -1,0 +1,45 @@
+[demo]
+output = "docs/assets/demo"          # demo-light.gif, demo-dark.gif
+size = [1200, 720]
+themes = ["light", "dark"]
+clock = "2026-10-01T09:00:00Z"        # pinned
+
+[[seed]]                             # before app launch, in a throwaway $HOME
+run = "callboard put reviews < fixtures/reviews.json"
+
+[[seed]]
+run = "callboard board add Inbox"
+
+[launch]
+app = "callboard-gui"
+wait_for = "Inbox"                   # an accessible name
+
+[camera]
+mode = "auto"                        # follow the action; "fixed" to never zoom
+max_zoom = 2.2
+ease = "0.6s"
+
+[[scene]]
+caption = "A script posts its feed"
+steps = [
+  # shown in the terminal / actually run
+  { terminal = "gh search prs … | callboard put reviews", run = "callboard put reviews < fixtures/new-pr.json" },
+  { wait_for = "Fix flaky upload retry" },
+  { hover = "Fix flaky upload retry", hold = "2.4s" },
+]
+
+[[scene]]
+caption = "Promote it to a todo"
+steps = [
+  { drag = "Drag to reorder or promote", near = "Fix flaky upload retry", to = "Todos", within = "Inbox" },
+  { click = "Book the room for Thursday's retro" },
+  { key = "ctrl+k" }, { type = "inbox" }, { key = "enter" },
+]
+
+[[scene]]
+caption = "Settings"
+steps = [
+  { camera = { focus = "Theme", zoom = 1.8 } },   # explicit framing
+  { drag_slider = "Font size", to = 0.7 },
+  { camera = "overview" },                        # ease back out
+]

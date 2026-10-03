@@ -130,9 +130,16 @@ prototype mount and an external network connection failed. The mixed GTK
 story still ran, including a real loopback TCP message from terminal to a
 service that updated the GUI. A detached child writing a heartbeat stopped
 after both a successful run and an intentional command failure. The experiment
-used `bwrap` as a stand-in; matinee will create the same boundary itself (see
-Architecture). The selected system mounts and per-story inputs still need a
-product policy.
+used `bwrap` as a stand-in; matinee now creates the same boundary itself (see
+Architecture).
+
+What a story sees of the host: the project, meaning the nearest folder above
+the storyboard that holds `.git`, read-only at `/project`, with commands
+starting in the storyboard's folder within it. Without a repository, or
+when that folder would be the home folder or `/`, only the storyboard's
+folder is shown. Anything else, such as an installed binary, is declared in
+`[session] mounts` and shown read-only at its host path. Results come back
+through a writable `/work`.
 
 Before release, repeat these checks with the chosen implementation and a
 broader set of host Unix sockets and system paths. Document explicit opt-ins
@@ -152,8 +159,14 @@ Start with a provisional warning at 2 MiB per theme, above callboard's
 existing GIFs, then adjust with real Matinee stories. Size alone is not a
 pass: the text acted on must remain legible at 400-pixel display width.
 
-The remaining theme question is how each supported real app is put into light
-and dark mode; a terminal theme alone does not change the GUI. Reduced-motion
+Light and dark come from the session, not the app: matinee serves the desktop
+portal's settings on the session bus (the `color-scheme` that libadwaita,
+GTK 4, and Qt 6 follow) and writes the same GNOME interface settings to a
+GSettings keyfile, which GTK reads outside a sandbox. Neither bus starts
+services on demand, so the session does not depend on what the host has
+installed. This put GTK 4 and libadwaita into both themes; GTK 3, Qt 5,
+Qt 6, and Electron still need checking. A terminal theme alone does not
+change the GUI. Reduced-motion
 behavior can use a still poster where a host supports it, without blocking
 GIF output.
 
@@ -171,6 +184,13 @@ dependencies of the finished tool.
   of frame timing and output geometry.
 - **Isolation:** matinee creates the user, mount, PID, and network namespaces
   itself, with the mount policy tested above.
+- **D-Bus and accessibility:** a private session bus and accessibility bus,
+  each the system's `dbus-daemon`, plus the system's `at-spi2-registryd`.
+  Any desktop that runs AT-SPI already has both. matinee answers
+  `org.a11y.Bus` and `org.a11y.Status` itself. An in-process bus (busd) was
+  tried and dropped: zbus, which it is built on, rewrites a message whose
+  only argument is a struct as separate arguments, and the AT-SPI registry
+  crashes on the first app that registers.
 - **Encoder:** a GIF encoder in matinee, built for this output: changed
   regions only, holds merged into long frames, one palette per clip, and
   per-scene size reporting.

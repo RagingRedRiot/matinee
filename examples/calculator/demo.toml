@@ -1,0 +1,27 @@
+# Adds two numbers in GNOME Calculator, by clicking and by typing.
+
+[demo]
+output = "calculator"
+size = [800, 600]
+
+[launch]
+app = "gnome-calculator"
+wait_for = "="
+
+[[scene]]
+caption = "Click the buttons"
+steps = [
+  { click = "7" },
+  { click = "+" },
+  { click = "8" },
+  { click = "=", hold = "1s" },
+  { expect = "15" },
+]
+
+[[scene]]
+caption = "Or type"
+steps = [
+  { type = "6*7" },
+  { key = "enter", hold = "1s" },
+  { expect = "42" },
+]

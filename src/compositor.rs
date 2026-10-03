@@ -310,6 +310,44 @@ impl Compositor {
         Ok(display)
     }
 
+    /// Set a string property on the X11 root window, where X11 apps look
+    /// for desktop-wide settings such as the accessibility bus.
+    pub fn set_x11_root_property(&self, name: &str, value: &str) -> io::Result<()> {
+        use smithay::reexports::x11rb::{
+            connection::Connection,
+            protocol::xproto::{AtomEnum, ConnectionExt, PropMode},
+            rust_connection::RustConnection,
+            wrapper::ConnectionExt as _,
+        };
+        let display = self
+            .xwayland
+            .as_ref()
+            .ok_or_else(|| io::Error::other("Xwayland is not running"))?
+            .display_number();
+        let x =
+            |e: &dyn std::fmt::Display| io::Error::other(format!("X11 root property {name}: {e}"));
+        let (conn, screen) =
+            RustConnection::connect(Some(&format!(":{display}"))).map_err(|e| x(&e))?;
+        let root = conn.setup().roots[screen].root;
+        let atom = conn
+            .intern_atom(false, name.as_bytes())
+            .map_err(|e| x(&e))?
+            .reply()
+            .map_err(|e| x(&e))?
+            .atom;
+        conn.change_property8(
+            PropMode::REPLACE,
+            root,
+            atom,
+            AtomEnum::STRING,
+            value.as_bytes(),
+        )
+        .map_err(|e| x(&e))?;
+        // The property outlives this connection.
+        conn.sync().map_err(|e| x(&e))?;
+        Ok(())
+    }
+
     /// Accept new clients and handle their requests, waiting up to
     /// `timeout` for something to happen.
     pub fn dispatch(&mut self, timeout: Duration) -> io::Result<()> {

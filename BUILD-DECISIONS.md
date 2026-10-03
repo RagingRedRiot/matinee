@@ -246,7 +246,12 @@ dependencies of the finished tool.
   never per session, so apps that also support Wayland stay on Wayland; it
   exists for apps that require X11. X11 apps draw at one pixel per point
   and are scaled up: most X11-only toolkits cannot be told to draw larger,
-  and a correct size matters more than sharpness.
+  and a correct size matters more than sharpness. matinee sets the root
+  window's `AT_SPI_BUS` property, as desktops do, because Qt 5 finds the
+  accessibility bus there; its other route, asking the session bus, makes
+  the registration call before its connection is up and loses it. On
+  Wayland, Qt 5 has only that route unless its build carries KDE's patch
+  for `AT_SPI_BUS_ADDRESS` (Ubuntu 24.04's 5.15.13 does not).
 - **D-Bus and accessibility:** a private session bus and accessibility bus,
   each the system's `dbus-daemon`, plus the system's `at-spi2-registryd`.
   Any desktop that runs AT-SPI already has both. matinee answers

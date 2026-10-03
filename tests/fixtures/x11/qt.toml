@@ -1,0 +1,22 @@
+# Named targeting in a Qt 5 window under X11, compiled in the session.
+
+[demo]
+output = "qt-x11"
+size = [800, 500]
+themes = ["light"]
+
+[[seed]]
+run = "c++ -fPIC qt_lab.cpp -o ~/qt_lab $(pkg-config --cflags --libs Qt5Widgets)"
+
+[launch]
+app = "~/qt_lab"
+x11 = true
+wait_for = "Save note"
+
+[[scene]]
+steps = [
+  { click = "Note" },
+  { type = "from x11" },
+  { click = "Save note" },
+  { expect = "saved: from x11" },
+]

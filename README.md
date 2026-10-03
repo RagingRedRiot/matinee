@@ -9,6 +9,14 @@ with a camera that eases in on whatever is being clicked, typed, or
 dragged so small controls read clearly in a large window. Change the program,
 run matinee again, and the demo is current.
 
+Think of it as demos as code. Like infrastructure as code, the demo lives
+in a file beside your project, is reviewed like any change, and is rebuilt
+rather than patched by hand, and a step that no longer matches the
+interface fails instead of recording something wrong. Reproducible means
+the same steps, performed the same way, with their outcomes checked, not
+byte-identical GIFs: live time labels, live sites, and font rendering vary
+from run to run.
+
 ```sh
 matinee record demo.toml        # perform the demo and write a GIF per theme
 matinee record                  # record every storyboard under this folder
@@ -140,9 +148,16 @@ are centered, and clicks, typing, and the camera work the same. Only that
 launch gets `DISPLAY`; other apps stay on Wayland, so an app that supports
 both never picks X11 by accident. X11 apps draw at one pixel per point and
 are scaled up, so they look slightly softer than Wayland apps at
-`scale = 2`. Many X11-only toolkits publish no accessibility tree; target
-their controls with window-relative points such as `click_at`. See the
-[Tk fixture](tests/fixtures/x11/demo.toml).
+`scale = 2`. Qt apps under X11 publish their accessibility tree, so steps
+can name their controls, but many X11-only toolkits, such as Tk, publish
+none; target their controls with window-relative points such as
+`click_at`. See the [Tk](tests/fixtures/x11/demo.toml) and
+[Qt](tests/fixtures/x11/qt.toml) fixtures.
+
+Qt 5 apps on Wayland publish their tree only when their Qt includes KDE's
+patch for reading `AT_SPI_BUS_ADDRESS`, which matinee sets. Qt 5.15.13 as
+shipped in Ubuntu 24.04 does not, so its Wayland apps can be targeted only
+by points.
 
 ## Examples
 

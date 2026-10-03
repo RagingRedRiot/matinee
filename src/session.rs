@@ -65,7 +65,11 @@ impl<'a> Session<'a> {
             story.demo.scale,
         )?;
         let x11_display = if story.launches.iter().any(|l| l.x11) {
-            Some(format!(":{}", compositor.start_xwayland(&runtime)?))
+            let display = compositor.start_xwayland(&runtime)?;
+            // Qt 5 finds the accessibility bus here on X11, as desktops
+            // publish it; asking the session bus loses a startup race.
+            compositor.set_x11_root_property("AT_SPI_BUS", &buses.a11y)?;
+            Some(format!(":{display}"))
         } else {
             None
         };

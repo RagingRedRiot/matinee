@@ -1,0 +1,49 @@
+# Tests pass, but the deploy fails its health check and rolls back.
+name = "hotfix"
+entry = "lint"
+at = "in 1s"
+
+[defaults]
+env = { JOB = "hotfix", VERSION = "2.3.1", DEPLOY = "fail" }
+
+[[step]]
+id = "lint"
+run = "./steps/lint.sh"
+on.success = { goto = "build" }
+on.fail = { end = "failure" }
+
+[[step]]
+id = "build"
+run = "./steps/build.sh"
+on.success = { goto = "test" }
+on.fail = { end = "failure" }
+
+[[step]]
+id = "test"
+run = "./steps/test.sh"
+max_visits = 3
+on.success = { goto = "deploy" }
+on.fail = { goto = "clear-cache" }
+
+[[step]]
+id = "clear-cache"
+run = "./steps/clear-cache.sh"
+on.success = { goto = "test" }
+on.fail = { end = "failure" }
+
+[[step]]
+id = "deploy"
+run = "./steps/deploy.sh"
+on.success = { goto = "smoke-test" }
+on.fail = { goto = "rollback" }
+
+[[step]]
+id = "smoke-test"
+run = "./steps/smoke-test.sh"
+on.success = { end = "success" }
+on.fail = { end = "failure" }
+
+[[step]]
+id = "rollback"
+run = "./steps/rollback.sh"
+on.always = { end = "failure" }

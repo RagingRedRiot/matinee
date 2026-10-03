@@ -1,0 +1,44 @@
+# cued's status window following a release pipeline as a graph: a test that
+# loops through clearing a cache, a deploy that rolls back, and a release
+# that ships. Build cued first in a checkout beside this one:
+# `cargo build --release -p cued -p cued-gui` in ~/cued.
+
+[demo]
+output = "cued"
+size = [1200, 860]
+
+[session]
+path = ["~/cued/target/release"]
+
+[terminal]
+size = 130
+font_size = 15
+
+# Other jobs, so the window looks like it does on a working machine.
+[[seed]]
+run = "cued every 6h -- ./steps/backup.sh > /dev/null; cued remind 45m 'stand-up' > /dev/null"
+
+[launch]
+app = "cued-gui"
+wait_for = "local runs"
+
+[[scene]]
+caption = "Submit a release pipeline"
+steps = [
+  { hold = "1s" },
+  { run = "cued submit release.toml" },
+  { click = "j3 release*" },
+  { click = "Graph" },
+  # Frame the graph, from lint to smoke-test, while the run plays out.
+  { camera = { focus = "deploy box*", zoom = 1.4 } },
+  { wait_for = "j3 release, done*", timeout = "40s", hold = "2.5s" },
+]
+
+[[scene]]
+caption = "A hotfix that rolls back"
+steps = [
+  { run = "cued submit hotfix.toml" },
+  { click = "j4 hotfix*" },
+  { camera = { focus = "deploy box*", zoom = 1.4 } },
+  { wait_for = "j4 hotfix, failed*", timeout = "30s", hold = "3s" },
+]

@@ -221,7 +221,10 @@ impl<'a> Session<'a> {
         let mut stable_since = Instant::now();
         loop {
             let frame = self.tick()?;
-            let shown = !self.compositor.windows().is_empty();
+            // A window counts once it has taken its final size: before
+            // that, a slow app can look settled at its first size.
+            let windows = self.compositor.windows();
+            let shown = !windows.is_empty() && windows.iter().all(|w| w.placed);
             if !shown || last.as_ref().is_none_or(|l| l.pixels != frame.pixels) {
                 stable_since = Instant::now();
             }

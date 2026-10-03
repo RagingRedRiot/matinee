@@ -1,7 +1,8 @@
 //! Performing a story's steps against a running session.
 //!
 //! Targets are found through the accessibility tree: an element showing on
-//! screen whose name matches exactly, narrowed by role, a named ancestor
+//! screen whose name matches exactly (or by prefix, for a name ending in
+//! `*`), narrowed by role, a named ancestor
 //! (`within`), its window, and its app (`in`). An element nested inside
 //! another match, such as a button's own label, counts as the same target.
 //! Anything else that leaves zero or several matches fails the step, with a
@@ -543,8 +544,8 @@ impl<'r, 'b> Runner<'r, 'b> {
                     .iter()
                     .enumerate()
                     .filter(|(_, n)| {
-                        n.name == target.name
-                            || (text && n.text.as_deref() == Some(target.name.as_str()))
+                        names(&target.name, &n.name)
+                            || (text && n.text.as_deref().is_some_and(|t| names(&target.name, t)))
                     })
                     .map(move |(i, _)| (a, i))
             })
@@ -687,6 +688,16 @@ impl<'r, 'b> Runner<'r, 'b> {
             rect: (left, top, w as f64, h as f64),
             value: node.value,
         })
+    }
+}
+
+/// Whether `name`, as a storyboard writes it, matches `actual`: exactly,
+/// or, when it ends in `*`, as a prefix, for labels that change as an app
+/// runs (`j1 release*` matches `j1 release, running, Now`).
+fn names(name: &str, actual: &str) -> bool {
+    match name.strip_suffix('*') {
+        Some(prefix) => actual.starts_with(prefix),
+        None => actual == name,
     }
 }
 
@@ -834,6 +845,15 @@ fn ambiguous(target: &Target, trees: &[(App, Vec<Node>)], several: &[(usize, usi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_trailing_star_matches_by_prefix() {
+        assert!(names("j1 release*", "j1 release, running, Now"));
+        assert!(names("j1 release*", "j1 release"));
+        assert!(!names("j1 release*", "j2 release"));
+        assert!(names("Drop here", "Drop here"));
+        assert!(!names("Drop", "Drop here"));
+    }
 
     #[test]
     fn role_names_from_different_toolkits_match() {

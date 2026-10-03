@@ -1,0 +1,18 @@
+{
+  "title": "Upstream releases",
+  "description": "New versions of tools we pin",
+  "items": [
+    {
+      "key": "sqlite",
+      "title": "SQLite 3.51.0",
+      "url": "https://sqlite.org/",
+      "color": "purple"
+    },
+    {
+      "key": "rust",
+      "title": "Rust 1.99.0",
+      "url": "https://blog.rust-lang.org/",
+      "color": "orange"
+    }
+  ]
+}

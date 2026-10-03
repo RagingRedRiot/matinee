@@ -157,7 +157,7 @@ fn snapshot(path: &str, out: &str, command: &[String]) -> ExitCode {
                         Some((program, args)) => session.spawn(program, program, args)?,
                         None => session.launch(&story)?,
                     }
-                    let frame = session.settle(Duration::from_secs(1), Duration::from_secs(20))?;
+                    let frame = session.settle(Duration::from_secs(1), Duration::from_secs(8))?;
                     frame.write_png(&std::path::Path::new(matinee::boundary::WORK).join("shot.png"))
                 });
                 match shot {
@@ -237,7 +237,7 @@ fn probe(path: &str, all: bool, command: &[String]) -> ExitCode {
                         Some((program, args)) => session.spawn(program, program, args)?,
                         None => session.launch(&story)?,
                     }
-                    session.settle(Duration::from_secs(1), Duration::from_secs(20))?;
+                    session.settle(Duration::from_secs(1), Duration::from_secs(8))?;
                     print_tree(&session, all)
                 });
             match listed {
@@ -261,7 +261,8 @@ fn probe(path: &str, all: bool, command: &[String]) -> ExitCode {
 }
 
 fn print_tree(session: &Session, all: bool) -> std::io::Result<()> {
-    for window in session.compositor.windows() {
+    let windows = session.compositor.windows();
+    for window in &windows {
         let r = window.rect;
         println!(
             "window \"{}\" ({}) at {},{} {}x{}{}",
@@ -281,12 +282,17 @@ fn print_tree(session: &Session, all: bool) -> std::io::Result<()> {
     }
     for app in apps {
         println!("\napp \"{}\" (pid {})", app.name, app.pid);
-        for node in a11y.nodes(&app, all) {
+        let nodes = a11y.nodes(&app, all);
+        for (i, node) in nodes.iter().enumerate() {
             if node.depth > 0 && node.name.is_empty() && node.text.is_none() && !all {
                 continue;
             }
-            let at = node
-                .extents
+            let size = windows
+                .iter()
+                .find(|w| w.title == node.window)
+                .or_else(|| (windows.len() == 1).then(|| &windows[0]))
+                .map_or((0, 0), |w| (w.rect.size.w, w.rect.size.h));
+            let at = matinee::a11y::in_points(&nodes, i, size, session.scale() as i32)
                 .map(|(x, y, w, h)| format!(" at {x},{y} {w}x{h}"))
                 .unwrap_or_default();
             let text = node

@@ -1,0 +1,22 @@
+{
+  "title": "Nightly builds",
+  "description": "Last night's CI runs on main",
+  "new_for": "12h",
+  "items": [
+    {
+      "key": "linux-x86_64",
+      "title": "linux-x86_64 · passed in 14m",
+      "color": "green"
+    },
+    {
+      "key": "linux-aarch64",
+      "title": "linux-aarch64 · passed in 19m",
+      "color": "green"
+    },
+    {
+      "key": "integration",
+      "title": "integration suite · passed in 31m",
+      "color": "green"
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+# callboard's README demo, recorded from the real app. Build callboard first
+# in a checkout beside this one: `cargo build --release` in ~/callboard.
+
+[demo]
+output = "callboard"
+size = [1200, 880]
+
+[session]
+path = ["~/callboard/target/release"]
+
+[terminal]
+size = 150
+font_size = 15
+
+[[seed]]
+run = "./seed.sh"
+
+[launch]
+app = "callboard-gui"
+wait_for = "Fix token refresh race in session store"
+
+[[scene]]
+caption = "A script posts its feed"
+steps = [
+  { hold = "1s" },
+  # shown in the terminal / actually run
+  { terminal = "gh search prs --review-requested=@me --json url,title | callboard put reviews", run = "callboard put reviews < fixtures/reviews-new.json" },
+  { wait_for = "Fix flaky upload retry" },
+  { hover = "Fix flaky upload retry", hold = "2.4s" },
+]
+
+[[scene]]
+caption = "Promote it to a todo"
+steps = [
+  { drag = "Drag to reorder or promote", near = "Fix flaky upload retry", to = "Reply to Sam about the session-store race", hold = "1.6s" },
+  { expect = "Fix flaky upload retry", role = "check box" },
+  { expect = "3 todos (3 open) · 1 note" },
+  { click = "Book the room for Thursday's retro", hold = "1.4s" },
+  { expect = "3 todos (2 open) · 1 note" },
+]
+
+[[scene]]
+caption = "Last night's builds come in"
+steps = [
+  { terminal = "./nightly-status | callboard put nightly", run = "callboard put nightly < fixtures/nightly-green.json", hold = "0.8s" },
+  { expect = "linux-aarch64 · passed in 19m", hold = "2s" },
+]

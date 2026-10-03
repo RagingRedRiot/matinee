@@ -111,6 +111,19 @@ fn story_and_root_are_read_only() {
 }
 
 #[test]
+fn session_folders_are_not_writable_by_others() {
+    let uid = host_uid();
+    // Owner-only or sticky folders are fine; others must not be writable
+    // by group or others.
+    assert_eq!(
+        stdout(&format!(
+            "stat -c '%n %a' /run /run/user /run/user/{uid} /home /home/matinee; umask"
+        )),
+        format!("/run 755\n/run/user 755\n/run/user/{uid} 700\n/home 755\n/home/matinee 700\n0022")
+    );
+}
+
+#[test]
 fn network_is_loopback_only() {
     assert_eq!(
         stdout(
@@ -249,6 +262,27 @@ fn declared_mounts_are_shown_read_only() {
     assert_eq!(
         seen,
         format!("{home}/proj/shared:\ndata\n\n{home}/tools/bin:\ntool\nrefused\nproj\ntools")
+    );
+}
+
+#[test]
+fn path_folders_put_programs_on_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::env::temp_dir().join(format!("matinee-path-{}", std::process::id()));
+    std::fs::create_dir_all(root.join("home/tools/bin")).unwrap();
+    let tool = root.join("home/tools/bin/greet");
+    std::fs::write(&tool, "#!/bin/sh\necho hello from greet\n").unwrap();
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let home = root.join("home");
+    let (seen, root) = outside(
+        "path",
+        "[session]\npath = [\"~/tools/bin\"]",
+        "greet; echo $PATH | cut -d: -f1",
+    );
+    std::fs::remove_dir_all(root).unwrap();
+    assert_eq!(
+        seen,
+        format!("hello from greet\n{}/tools/bin", home.display())
     );
 }
 

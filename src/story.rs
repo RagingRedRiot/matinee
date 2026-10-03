@@ -64,6 +64,9 @@ pub struct Session {
     /// written: `~` is the host home, and relative paths start at the
     /// storyboard.
     pub mounts: Vec<String>,
+    /// Folders of programs, mounted like `mounts` and put at the front of
+    /// `PATH` inside, in order.
+    pub path: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -349,6 +352,8 @@ struct RawCamera {
 struct RawSession {
     #[serde(default)]
     mounts: Vec<String>,
+    #[serde(default)]
+    path: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -523,7 +528,12 @@ impl RawStory {
         }
 
         let session = Session {
-            mounts: self.session.map(|s| s.mounts).unwrap_or_default(),
+            mounts: self
+                .session
+                .as_ref()
+                .map(|s| s.mounts.clone())
+                .unwrap_or_default(),
+            path: self.session.map(|s| s.path).unwrap_or_default(),
         };
         let t = self.terminal.unwrap_or(RawTerminal {
             position: None,
@@ -549,6 +559,9 @@ impl RawStory {
         }
         if let Some(m) = session.mounts.iter().find(|m| m.trim().is_empty()) {
             return Err(format!("session.mounts: `{m}` is not a path"));
+        }
+        if let Some(m) = session.path.iter().find(|m| m.trim().is_empty()) {
+            return Err(format!("session.path: `{m}` is not a path"));
         }
 
         Ok(Story {

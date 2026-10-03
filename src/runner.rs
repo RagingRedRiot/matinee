@@ -142,6 +142,20 @@ impl<'r, 'b> Runner<'r, 'b> {
                 }
             }
         }
+        // Windows first draw at their own size and are then resized to
+        // their place; steps start once every window has settled there.
+        let start = Instant::now();
+        while !self.session.compositor.windows().iter().all(|w| w.placed) {
+            if start.elapsed() > LAUNCH_TIMEOUT {
+                return Err(Failure {
+                    at: "launch".into(),
+                    message: "a window never took its place on screen".into(),
+                });
+            }
+            self.session.tick()?;
+        }
+        // One more frame, drawn at the final size.
+        self.session.tick()?;
         Ok(())
     }
 
@@ -450,7 +464,7 @@ impl<'r, 'b> Runner<'r, 'b> {
             target
                 .role
                 .as_ref()
-                .is_none_or(|r| node.role.eq_ignore_ascii_case(r))
+                .is_none_or(|r| same_role(&node.role, r))
                 && target.window.as_ref().is_none_or(|w| &node.window == w)
                 && target
                     .within
@@ -473,7 +487,7 @@ impl<'r, 'b> Runner<'r, 'b> {
         }
         match outer.as_slice() {
             [] => Err(not_found(target, &trees, &named)),
-            [(a, i)] => self.on_screen(&trees[*a].1[*i], target),
+            [(a, i)] => self.on_screen(&trees[*a].1, *i, target),
             several => Err(ambiguous(target, &trees, several)),
         }
     }
@@ -533,7 +547,8 @@ impl<'r, 'b> Runner<'r, 'b> {
     }
 
     /// Where `node` is on the output, if it is inside its window.
-    fn on_screen(&self, node: &Node, target: &Target) -> Result<Found, String> {
+    fn on_screen(&self, nodes: &[Node], i: usize, target: &Target) -> Result<Found, String> {
+        let node = &nodes[i];
         let windows = self.session.compositor.windows();
         let window = windows
             .iter()
@@ -548,9 +563,13 @@ impl<'r, 'b> Runner<'r, 'b> {
                     titles.join(", ")
                 )
             })?;
-        let (x, y, w, h) = node
-            .extents
-            .ok_or_else(|| format!("\"{}\" does not report its position", target.name))?;
+        let (x, y, w, h) = crate::a11y::in_points(
+            nodes,
+            i,
+            (window.rect.size.w, window.rect.size.h),
+            self.session.scale() as i32,
+        )
+        .ok_or_else(|| format!("\"{}\" does not report its position", target.name))?;
         let (cx, cy) = (x as f64 + w as f64 / 2.0, y as f64 + h as f64 / 2.0);
         let size = window.rect.size;
         if cx < 0.0 || cy < 0.0 || cx >= size.w as f64 || cy >= size.h as f64 {
@@ -578,6 +597,18 @@ impl<'r, 'b> Runner<'r, 'b> {
             value: node.value,
         })
     }
+}
+
+/// Whether two role names mean the same role. Toolkits name some roles
+/// differently: GTK says "button" where AT-SPI says "push button", and
+/// "text box" where it says "entry".
+fn same_role(a: &str, b: &str) -> bool {
+    const ALIASES: &[&[&str]] = &[&["button", "push button"], &["text box", "entry"]];
+    let (a, b) = (a.to_ascii_lowercase(), b.to_ascii_lowercase());
+    a == b
+        || ALIASES
+            .iter()
+            .any(|group| group.contains(&a.as_str()) && group.contains(&b.as_str()))
 }
 
 /// The last lines of a terminal screen, for a diagnostic.
@@ -702,6 +733,15 @@ fn ambiguous(target: &Target, trees: &[(App, Vec<Node>)], several: &[(usize, usi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn role_names_from_different_toolkits_match() {
+        assert!(same_role("push button", "button"));
+        assert!(same_role("Button", "push button"));
+        assert!(same_role("text box", "entry"));
+        assert!(!same_role("toggle button", "button"));
+        assert!(!same_role("label", "button"));
+    }
 
     #[test]
     fn a_process_descends_from_itself_and_its_parent() {

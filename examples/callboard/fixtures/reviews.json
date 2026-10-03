@@ -1,0 +1,37 @@
+{
+  "title": "atlas — review requests",
+  "description": "Open PRs in acme/atlas waiting on my review",
+  "source_url": "https://github.com/acme/atlas/pulls",
+  "new_for": "24h",
+  "items": [
+    {
+      "key": "https://github.com/acme/atlas/pull/412",
+      "title": "Fix token refresh race in session store",
+      "url": "https://github.com/acme/atlas/pull/412",
+      "meta": {
+        "author": "sam",
+        "checks": "passing"
+      },
+      "color": "red"
+    },
+    {
+      "key": "https://github.com/acme/atlas/pull/409",
+      "title": "Add retry budget to the export worker",
+      "url": "https://github.com/acme/atlas/pull/409",
+      "meta": {
+        "author": "sam",
+        "checks": "passing"
+      }
+    },
+    {
+      "key": "https://github.com/acme/atlas/pull/405",
+      "title": "Docs: clarify rate-limit headers",
+      "url": "https://github.com/acme/atlas/pull/405",
+      "meta": {
+        "author": "sam",
+        "checks": "passing"
+      },
+      "color": "green"
+    }
+  ]
+}

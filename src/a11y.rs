@@ -27,6 +27,142 @@ const TEXT_ROLES: &[&str] = &[
 const REGISTRY: &str = "org.a11y.atspi.Registry";
 const ROOT: &str = "/org/a11y/atspi/accessible/root";
 const COORD_WINDOW: u32 = 1;
+/// AT-SPI's role names, by role number, for apps that report a role but
+/// not its name (AccessKit, used by egui and others, reports only the
+/// number).
+const ROLE_NAMES: [&str; 130] = [
+    "invalid",
+    "accelerator label",
+    "alert",
+    "animation",
+    "arrow",
+    "calendar",
+    "canvas",
+    "check box",
+    "check menu item",
+    "color chooser",
+    "column header",
+    "combo box",
+    "date editor",
+    "desktop icon",
+    "desktop frame",
+    "dial",
+    "dialog",
+    "directory pane",
+    "drawing area",
+    "file chooser",
+    "filler",
+    "focus traversable",
+    "font chooser",
+    "frame",
+    "glass pane",
+    "html container",
+    "icon",
+    "image",
+    "internal frame",
+    "label",
+    "layered pane",
+    "list",
+    "list item",
+    "menu",
+    "menu bar",
+    "menu item",
+    "option pane",
+    "page tab",
+    "page tab list",
+    "panel",
+    "password text",
+    "popup menu",
+    "progress bar",
+    "push button",
+    "radio button",
+    "radio menu item",
+    "root pane",
+    "row header",
+    "scroll bar",
+    "scroll pane",
+    "separator",
+    "slider",
+    "spin button",
+    "split pane",
+    "status bar",
+    "table",
+    "table cell",
+    "table column header",
+    "table row header",
+    "tearoff menu item",
+    "terminal",
+    "text",
+    "toggle button",
+    "tool bar",
+    "tool tip",
+    "tree",
+    "tree table",
+    "unknown",
+    "viewport",
+    "window",
+    "extended",
+    "header",
+    "footer",
+    "paragraph",
+    "ruler",
+    "application",
+    "autocomplete",
+    "editbar",
+    "embedded",
+    "entry",
+    "chart",
+    "caption",
+    "document frame",
+    "heading",
+    "page",
+    "section",
+    "redundant object",
+    "form",
+    "link",
+    "input method window",
+    "table row",
+    "tree item",
+    "document spreadsheet",
+    "document presentation",
+    "document text",
+    "document web",
+    "document email",
+    "comment",
+    "list box",
+    "grouping",
+    "image map",
+    "notification",
+    "info bar",
+    "level bar",
+    "title bar",
+    "block quote",
+    "audio",
+    "video",
+    "definition",
+    "article",
+    "landmark",
+    "log",
+    "marquee",
+    "math",
+    "rating",
+    "timer",
+    "static",
+    "math fraction",
+    "math root",
+    "subscript",
+    "superscript",
+    "description list",
+    "description term",
+    "description value",
+    "footnote",
+    "content deletion",
+    "content insertion",
+    "mark",
+    "suggestion",
+    "push button menu",
+];
+
 /// Bit positions in the AT-SPI state set.
 const STATE_FOCUSED: u32 = 12;
 const STATE_SHOWING: u32 = 25;
@@ -172,8 +308,14 @@ impl A11y {
                     stack.push((child, depth + 1, window.clone(), Some(index)));
                 }
             }
-            let role: String = self
-                .call(bus, p, ACCESSIBLE, "GetRoleName", &())
+            let role = self
+                .call::<_, String>(bus, p, ACCESSIBLE, "GetRoleName", &())
+                .ok()
+                .filter(|name| !name.is_empty())
+                .or_else(|| {
+                    let number: u32 = self.call(bus, p, ACCESSIBLE, "GetRole", &()).ok()?;
+                    ROLE_NAMES.get(number as usize).map(|name| name.to_string())
+                })
                 .unwrap_or_default();
             let text = TEXT_ROLES
                 .contains(&role.as_str())
@@ -224,5 +366,83 @@ impl A11y {
             });
         }
         out
+    }
+}
+
+/// Node `i`'s position and size relative to its window, in logical points.
+///
+/// Toolkits that report device pixels (AccessKit) are recognized by their
+/// window's root element measuring the window's size times the output
+/// `scale`, in both directions, and scaled back down. Anything else, such
+/// as a root still at an old size while the window is resized, is taken
+/// as points.
+pub fn in_points(
+    nodes: &[Node],
+    i: usize,
+    window: (i32, i32),
+    scale: i32,
+) -> Option<(i32, i32, i32, i32)> {
+    let (x, y, w, h) = nodes[i].extents?;
+    let root = std::iter::successors(Some(i), |&j| nodes[j].parent)
+        .last()
+        .unwrap_or(i);
+    let near = |a: i32, b: i32| (a - b).abs() <= scale;
+    let device = scale > 1
+        && nodes[root]
+            .extents
+            .is_some_and(|(_, _, rw, rh)| near(rw, window.0 * scale) && near(rh, window.1 * scale));
+    let f = if device { scale } else { 1 };
+    Some((x / f, y / f, w / f, h / f))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(extents: (i32, i32, i32, i32), parent: Option<usize>) -> Node {
+        Node {
+            name: String::new(),
+            role: String::new(),
+            depth: parent.map_or(0, |_| 1),
+            parent,
+            window: String::new(),
+            extents: Some(extents),
+            showing: true,
+            focused: false,
+            text: None,
+            value: None,
+        }
+    }
+
+    #[test]
+    fn device_pixels_are_scaled_to_points() {
+        // A 1200-point window whose root reports 2400 device pixels.
+        let nodes = [
+            node((0, 0, 2400, 1440), None),
+            node((20, 12, 210, 46), Some(0)),
+        ];
+        assert_eq!(in_points(&nodes, 1, (1200, 720), 2), Some((10, 6, 105, 23)));
+    }
+
+    #[test]
+    fn a_root_at_an_old_size_is_not_taken_for_device_pixels() {
+        // Mid-resize: the root still reports 1300x900 in an 800x600 window.
+        let nodes = [
+            node((0, 0, 1300, 900), None),
+            node((20, 12, 210, 46), Some(0)),
+        ];
+        assert_eq!(in_points(&nodes, 1, (800, 600), 2), Some((20, 12, 210, 46)));
+    }
+
+    #[test]
+    fn points_are_left_alone() {
+        let nodes = [
+            node((0, 0, 1200, 720), None),
+            node((20, 12, 210, 46), Some(0)),
+        ];
+        assert_eq!(
+            in_points(&nodes, 1, (1200, 720), 2),
+            Some((20, 12, 210, 46))
+        );
     }
 }

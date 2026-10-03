@@ -202,7 +202,9 @@ impl<'a> Session<'a> {
     }
 
     /// Run the session in real time until a window is shown and the screen
-    /// has stopped changing for `quiet`, then return the last frame.
+    /// has stopped changing for `quiet`, then return the last frame. If a
+    /// window is shown but the screen never stops changing, the frame at
+    /// `timeout` is returned instead.
     pub fn settle(&mut self, quiet: Duration, timeout: Duration) -> io::Result<Frame> {
         let start = Instant::now();
         let mut last: Option<Frame> = None;
@@ -217,14 +219,25 @@ impl<'a> Session<'a> {
                 return Ok(frame);
             }
             if start.elapsed() > timeout {
-                return Err(io::Error::other(if shown {
-                    format!("the screen was still changing after {timeout:?}")
-                } else {
-                    format!("no window appeared within {timeout:?}")
-                }));
+                if shown {
+                    // Something keeps changing, such as a clock; the
+                    // latest frame is as settled as the screen gets.
+                    eprintln!(
+                        "matinee: the screen was still changing after {timeout:?}; using the latest frame"
+                    );
+                    return Ok(frame);
+                }
+                return Err(io::Error::other(format!(
+                    "no window appeared within {timeout:?}"
+                )));
             }
             last = Some(frame);
         }
+    }
+
+    /// Device pixels per point.
+    pub fn scale(&self) -> u32 {
+        self.scale
     }
 
     /// The time on the session's frame timeline.

@@ -75,6 +75,8 @@ pub struct Boundary {
     story_dir: PathBuf,
     /// Extra host paths shown read-only at the same path.
     mounts: Vec<PathBuf>,
+    /// Folders put at the front of `PATH`, also among `mounts`.
+    path: Vec<PathBuf>,
     /// Host folder shown writable at [`WORK`].
     work_dir: PathBuf,
 }
@@ -106,7 +108,14 @@ impl Boundary {
         let inside = Path::new(PROJECT).join(story_dir.strip_prefix(&project_dir).unwrap());
 
         let mut mounts = Vec::new();
-        for written in &story.session.mounts {
+        let mut path_dirs = Vec::new();
+        let declared = story
+            .session
+            .mounts
+            .iter()
+            .map(|m| ("session.mounts", m))
+            .chain(story.session.path.iter().map(|m| ("session.path", m)));
+        for (field, written) in declared {
             let path = match (written.strip_prefix('~'), &home) {
                 (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with('/') => {
                     home.join(rest.trim_start_matches('/'))
@@ -114,12 +123,15 @@ impl Boundary {
                 _ => story_dir.join(written),
             };
             let path = fs::canonicalize(&path)
-                .map_err(|e| io::Error::new(e.kind(), format!("session.mounts: {written}: {e}")))?;
+                .map_err(|e| io::Error::new(e.kind(), format!("{field}: {written}: {e}")))?;
             if too_wide(&path) {
                 return Err(io::Error::other(format!(
-                    "session.mounts: {written} would show all of {} to the session",
+                    "{field}: {written} would show all of {} to the session",
                     path.display()
                 )));
+            }
+            if field == "session.path" {
+                path_dirs.push(path.clone());
             }
             mounts.push(path);
         }
@@ -128,8 +140,19 @@ impl Boundary {
             project_dir,
             story_dir: inside,
             mounts,
+            path: path_dirs,
             work_dir: fs::canonicalize(work_dir)?,
         })
+    }
+
+    /// `PATH` inside: the storyboard's `session.path`, then the system's.
+    fn search_path(&self) -> String {
+        self.path
+            .iter()
+            .map(|p| p.display().to_string())
+            .chain(["/usr/local/bin", "/usr/bin", "/bin"].map(String::from))
+            .collect::<Vec<_>>()
+            .join(":")
     }
 
     /// The storyboard's folder as seen inside.
@@ -147,7 +170,7 @@ impl Boundary {
             .env("HOME", HOME)
             .env("USER", HOSTNAME)
             .env("LOGNAME", HOSTNAME)
-            .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+            .env("PATH", self.search_path())
             .env("LANG", "C.UTF-8")
             .env("TZ", "UTC")
             .env("TERM", "xterm-256color")
@@ -273,6 +296,10 @@ fn report(fd: libc::c_int, message: &str) -> i32 {
 
 /// Replace the root with one holding only what a story may see.
 fn build_root(b: &Boundary, exe: &Path, uid: libc::uid_t, gid: libc::gid_t) -> io::Result<()> {
+    // Files and folders the session creates are not writable by others,
+    // whatever the caller's umask; apps that check the folders above their
+    // sockets refuse group-writable ones.
+    unsafe { libc::umask(0o022) };
     // Keep every mount change inside this namespace.
     mount(None, "/", None, libc::MS_REC | libc::MS_PRIVATE, None)?;
 

@@ -126,6 +126,9 @@ pub struct WindowInfo {
     pub rect: Rectangle<i32, Logical>,
     /// Whether it has keyboard focus.
     pub focused: bool,
+    /// Whether it has been given its place: sized to the window area, or,
+    /// for a dialog, centered at its own size.
+    pub placed: bool,
 }
 
 pub struct Compositor {
@@ -378,6 +381,11 @@ impl Compositor {
                     app_id,
                     rect: Rectangle::new(loc, window.geometry().size),
                     focused: focus.as_ref() == Some(toplevel.wl_surface()),
+                    // The app has also acknowledged the size it was given.
+                    placed: (window.user_data().get::<Sized>().is_some()
+                        && toplevel.current_state().size
+                            == toplevel.with_pending_state(|s| s.size))
+                        || window.user_data().get::<Centered>().is_some(),
                 })
             })
             .collect()

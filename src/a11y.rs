@@ -383,14 +383,23 @@ pub fn in_points(
     scale: i32,
 ) -> Option<(i32, i32, i32, i32)> {
     let (x, y, w, h) = nodes[i].extents?;
-    let root = std::iter::successors(Some(i), |&j| nodes[j].parent)
-        .last()
-        .unwrap_or(i);
     let near = |a: i32, b: i32| (a - b).abs() <= scale;
+    // Some Chromium browsers report the top-level frame in points but the
+    // document beneath it in device pixels. Use the nearest ancestor whose
+    // size identifies its coordinate space, rather than only the root.
     let device = scale > 1
-        && nodes[root]
-            .extents
-            .is_some_and(|(_, _, rw, rh)| near(rw, window.0 * scale) && near(rh, window.1 * scale));
+        && std::iter::successors(Some(i), |&j| nodes[j].parent)
+            .filter_map(|j| nodes[j].extents)
+            .find_map(|(_, _, rw, rh)| {
+                if near(rw, window.0 * scale) && near(rh, window.1 * scale) {
+                    Some(true)
+                } else if near(rw, window.0) && near(rh, window.1) {
+                    Some(false)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(false);
     let f = if device { scale } else { 1 };
     Some((x / f, y / f, w / f, h / f))
 }
@@ -422,6 +431,23 @@ mod tests {
             node((20, 12, 210, 46), Some(0)),
         ];
         assert_eq!(in_points(&nodes, 1, (1200, 720), 2), Some((10, 6, 105, 23)));
+    }
+
+    #[test]
+    fn device_pixel_document_under_point_sized_frame() {
+        let nodes = [
+            node((0, 0, 1200, 800), None),
+            node((0, 0, 2400, 1600), Some(0)),
+            node((610, 654, 892, 100), Some(1)),
+        ];
+        assert_eq!(
+            in_points(&nodes, 2, (1200, 800), 2),
+            Some((305, 327, 446, 50))
+        );
+        assert_eq!(
+            in_points(&nodes, 0, (1200, 800), 2),
+            Some((0, 0, 1200, 800))
+        );
     }
 
     #[test]

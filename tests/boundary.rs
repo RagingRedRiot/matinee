@@ -143,6 +143,44 @@ fn network_is_loopback_only() {
 }
 
 #[test]
+#[ignore = "needs pasta and outside network access"]
+fn network_opt_in_keeps_the_host_out_of_reach() {
+    // A service on the host's loopback, which the session must not reach.
+    let host_service = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = host_service.local_addr().unwrap().port();
+    let host_net = std::fs::read_link("/proc/self/ns/net").unwrap();
+    // The host's abstract Unix sockets, such as an X display, belong to its
+    // network namespace.
+    let host_abstract: Vec<String> = std::fs::read_to_string("/proc/net/unix")
+        .unwrap()
+        .lines()
+        .filter_map(|l| l.split_whitespace().nth(7))
+        .filter(|name| name.starts_with('@'))
+        .map(str::to_owned)
+        .collect();
+    let (seen, root) = outside(
+        "network",
+        "[session]\nnetwork = true",
+        &format!(
+            "readlink /proc/self/ns/net; \
+             getent hosts example.com >/dev/null && echo dns; \
+             test -d /etc/ssl/certs && echo certs; \
+             timeout 2 bash -c 'echo > /dev/tcp/127.0.0.1/{port}' 2>/dev/null && echo open || echo closed; \
+             awk 'NR > 1 && $8 ~ /^@/ {{ print $8 }}' /proc/net/unix"
+        ),
+    );
+    std::fs::remove_dir_all(root).unwrap();
+    let mut lines = seen.lines();
+    assert_ne!(lines.next(), Some(host_net.to_str().unwrap()));
+    assert_eq!(lines.next(), Some("dns"));
+    assert_eq!(lines.next(), Some("certs"));
+    assert_eq!(lines.next(), Some("closed"), "host loopback reachable");
+    for name in lines {
+        assert!(!host_abstract.iter().any(|h| h == name), "{name} visible");
+    }
+}
+
+#[test]
 fn terminals_work() {
     assert_eq!(
         stdout("python3 -c 'import os,pty; m,s=pty.openpty(); print(os.isatty(s))'"),

@@ -114,6 +114,13 @@ build and settings.
 
 ## Isolation contract to prove
 
+The isolation exists so that personal and identifying details about the user
+and their machine cannot end up in a recording: host files, the home folder,
+user and host names, other windows, sessions, and logins. It is not a sandbox
+for untrusted or malicious software, such as malware detonation, and must not
+be presented as one. It is not designed or tested to withstand a program
+trying to escape, and it would not hold up as that kind of safety net.
+
 The current runner uses a fresh home and runtime directory, starts GUI apps
 in that home, disables their network by default, and reaps detached children.
 This is useful state isolation, not yet a containment boundary. Apps can
@@ -142,6 +149,23 @@ when that folder would be the home folder or `/`, only the storyboard's
 folder is shown. Anything else, such as an installed binary, is declared in
 `[session] mounts` and shown read-only at its host path. Results come back
 through a writable `/work`.
+
+`[session] network = true` gives the session outside access, including DNS
+and HTTPS, for stories such as web demos. It is off by default; without it,
+the session has only its own loopback interface. The opt-in keeps the
+session's private network namespace and connects it to the outside with
+`pasta`, from the passt project, which carries traffic through the host's
+sockets. Like Xwayland, pasta is an optional dependency that only these
+stories need; without it, such a story fails and suggests `--no-isolation`.
+
+Sharing the host's network namespace instead was tried and rejected: the
+host's abstract Unix sockets belong to that namespace, and a process in the
+session could open the host's X display. Pasta runs with `--no-map-gw` and no
+port forwarding in either direction, so the host's loopback services stay out
+of reach and the session's own localhost stays private. DNS goes to a
+forwarding address that pasta relays to the host's resolver, since that
+resolver often listens on the host's loopback. Other hosts, including those on
+the local network and the host's own non-loopback addresses, are reachable.
 
 Before release, repeat these checks with the chosen implementation and a
 broader set of host Unix sockets and system paths. Document explicit opt-ins
@@ -216,6 +240,13 @@ dependencies of the finished tool.
   of frame timing and output geometry.
 - **Isolation:** matinee creates the user, mount, PID, and network namespaces
   itself, with the mount policy tested above.
+- **X11 apps:** Xwayland, started only when a launch sets `x11 = true`,
+  with matinee as its window manager through smithay's X11 support. It is
+  an optional runtime dependency, like pasta. X11 is chosen per launch,
+  never per session, so apps that also support Wayland stay on Wayland; it
+  exists for apps that require X11. X11 apps draw at one pixel per point
+  and are scaled up: most X11-only toolkits cannot be told to draw larger,
+  and a correct size matters more than sharpness.
 - **D-Bus and accessibility:** a private session bus and accessibility bus,
   each the system's `dbus-daemon`, plus the system's `at-spi2-registryd`.
   Any desktop that runs AT-SPI already has both. matinee answers

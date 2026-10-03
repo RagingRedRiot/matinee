@@ -292,6 +292,10 @@ impl<'r, 'b> Runner<'r, 'b> {
                 let found = self.wait_until(target, step.timeout.unwrap_or(FIND_TIMEOUT), false)?;
                 self.frame(rect(found.rect), *zoom).map_err(io)?;
             }
+            Action::Camera(CameraMove::FocusAt { spot, zoom }) => {
+                let point = self.spot(spot)?;
+                self.frame(around(point), *zoom).map_err(io)?;
+            }
             Action::Run {
                 command,
                 shown,

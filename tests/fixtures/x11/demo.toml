@@ -1,0 +1,20 @@
+# Typing and clicking in an X11-only Tk window, under Xwayland. Tk has no
+# accessibility tree, so steps use window-relative points.
+
+[demo]
+output = "x11"
+size = [800, 500]
+themes = ["light"]
+
+[launch]
+app = "python3"
+args = ["tk_lab.py"]
+x11 = true
+
+[[scene]]
+steps = [
+  { click_at = [170, 36] },
+  { type = "hello x11" },
+  { click_at = [70, 86] },
+  { run = "test \"$(cat ~/typed)\" = 'hello x11'" },
+]

@@ -60,6 +60,8 @@ impl Story {
 /// What the isolated session may see beyond the project.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Session {
+    /// Give the session outside access through pasta. Off by default.
+    pub network: bool,
     /// Extra host paths shown read-only at the same path inside, as
     /// written: `~` is the host home, and relative paths start at the
     /// storyboard.
@@ -105,8 +107,6 @@ impl Theme {
 pub struct Seed {
     pub run: String,
     pub timeout: Option<Duration>,
-    /// Outside network access, which is off unless asked for.
-    pub network: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -119,7 +119,8 @@ pub struct Launch {
     /// An accessible name whose appearance means the app is ready.
     pub wait_for: Option<String>,
     pub timeout: Option<Duration>,
-    pub network: bool,
+    /// Run the app under Xwayland, for apps that cannot use Wayland.
+    pub x11: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -260,6 +261,12 @@ pub enum CameraMove {
         target: Target,
         zoom: Option<f64>,
     },
+    /// Frame a window-relative point when the desired area has no stable
+    /// accessible name, without moving the pointer there.
+    FocusAt {
+        spot: Spot,
+        zoom: Option<f64>,
+    },
 }
 
 /// A storyboard that could not be read or does not make sense.
@@ -360,8 +367,6 @@ struct RawDemo {
 struct RawSeed {
     run: String,
     timeout: Option<String>,
-    #[serde(default)]
-    network: bool,
 }
 
 #[derive(Deserialize)]
@@ -374,7 +379,7 @@ struct RawLaunch {
     wait_for: Option<String>,
     timeout: Option<String>,
     #[serde(default)]
-    network: bool,
+    x11: bool,
 }
 
 #[derive(Deserialize)]
@@ -389,6 +394,8 @@ struct RawCamera {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSession {
+    #[serde(default)]
+    network: bool,
     #[serde(default)]
     mounts: Vec<String>,
     #[serde(default)]
@@ -450,6 +457,7 @@ enum RawTo {
 enum RawCameraMove {
     Named(String),
     Focus(RawFocus),
+    FocusAt(RawFocusAt),
 }
 
 #[derive(Deserialize)]
@@ -457,6 +465,14 @@ enum RawCameraMove {
 struct RawFocus {
     focus: String,
     zoom: Option<f64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawFocusAt {
+    focus_at: [f64; 2],
+    zoom: Option<f64>,
+    window: Option<String>,
 }
 
 fn duration(field: &str, text: Option<String>) -> Result<Option<Duration>, String> {
@@ -506,7 +522,6 @@ impl RawStory {
                 Ok(Seed {
                     run: s.run,
                     timeout: duration(&format!("seed {}: timeout", i + 1), s.timeout)?,
-                    network: s.network,
                 })
             })
             .collect::<Result<_, String>>()?;
@@ -536,7 +551,7 @@ impl RawStory {
                 app: l.app,
                 args: l.args,
                 wait_for: l.wait_for,
-                network: l.network,
+                x11: l.x11,
             });
         }
 
@@ -584,6 +599,7 @@ impl RawStory {
         check_running(&scenes)?;
 
         let session = Session {
+            network: self.session.as_ref().is_some_and(|s| s.network),
             mounts: self
                 .session
                 .as_ref()
@@ -797,7 +813,10 @@ impl RawStep {
         let terminal_text =
             matches!(action, Some("wait_for" | "expect")) && context.iter().all(|(_, set)| !set);
         let targets_app = action.is_some_and(|a| targeted.contains(&a)) && !terminal_text
-            || matches!(self.camera, Some(RawCameraMove::Focus(_)));
+            || matches!(
+                self.camera,
+                Some(RawCameraMove::Focus(_) | RawCameraMove::FocusAt(_))
+            );
         if targets_app && launches.is_empty() {
             return Err("this step targets an app, but the storyboard launches none".into());
         }
@@ -963,6 +982,23 @@ impl RawStep {
                         target: Target {
                             name: f.focus,
                             ..Target::default()
+                        },
+                        zoom: f.zoom,
+                    })
+                }
+                RawCameraMove::FocusAt(f) => {
+                    if let Some(z) = f.zoom {
+                        if !(1.0..=max_zoom).contains(&z) {
+                            return Err(format!(
+                                "camera zoom {z} is outside 1 to camera.max_zoom ({max_zoom})"
+                            ));
+                        }
+                    }
+                    Action::Camera(CameraMove::FocusAt {
+                        spot: Spot {
+                            x: f.focus_at[0],
+                            y: f.focus_at[1],
+                            window: f.window,
                         },
                         zoom: f.zoom,
                     })

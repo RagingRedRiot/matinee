@@ -1,0 +1,37 @@
+# A live web page, recorded without browser chrome. Requires Firefox, pasta,
+# and outside network access; see README.md in this folder before recording.
+
+[session]
+network = true
+
+[demo]
+output = "google-search"
+size = [1200, 800]
+scale = 2
+themes = ["light"]
+
+[launch]
+app = "bash"
+args = ["./launch.sh"]
+wait_for = "Search"
+
+[[scene]]
+caption = "An important question"
+steps = [
+  { click = "Search", role = "combo box", hold = "0.3s" },
+  # Center the whole search box while the question is typed.
+  { camera = { focus_at = [600, 350], zoom = 1.6 }, hold = "0.3s" },
+  { type = "do penguins have knees", hold = "1.2s" },
+  { camera = "overview", hold = "0.7s" },
+]
+
+[[scene]]
+caption = "Let's find out"
+steps = [
+  { key = "enter", hold = "1s" },
+  { wait_for = "do penguins have knees - Google Search*", role = "frame", timeout = "15s" },
+  { expect = "All", role = "link", hold = "0.6s" },
+  # Center the answer column without depending on Google's changing heading.
+  { camera = { focus_at = [488, 390], zoom = 1.5 }, hold = "2.5s" },
+  { camera = "overview", hold = "1.5s" },
+]

@@ -51,6 +51,36 @@ fn defaults() {
     assert_eq!(story.camera.reading_width, 800);
     assert_eq!(story.demo.lossy, 6);
     assert_eq!(story.launches[0].name, "watch-file");
+    assert!(!story.session.network);
+}
+
+#[test]
+fn x11_is_asked_for_per_launch() {
+    let story = Story::parse(
+        "[demo]\noutput = \"d\"\nsize = [800, 480]\n[[launch]]\napp = \"old\"\nx11 = true\n[[launch]]\napp = \"new\"\n[[scene]]\nsteps = [{ click = \"Go\" }]\n",
+        PathBuf::from("tests"),
+    )
+    .unwrap();
+    assert!(story.launches[0].x11);
+    assert!(!story.launches[1].x11);
+}
+
+#[test]
+fn network_is_an_explicit_session_opt_in() {
+    let story = Story::parse(
+        &format!("{HEAD}\n[session]\nnetwork = true\n[[scene]]\nsteps = [{{ click = \"Go\" }}]\n"),
+        PathBuf::from("tests"),
+    )
+    .unwrap();
+    assert!(story.session.network);
+
+    // Network access is per session, not per app.
+    let per_launch = Story::parse(
+        "[demo]\noutput = \"d\"\nsize = [800, 480]\n[launch]\napp = \"foo\"\nnetwork = true\n[[scene]]\nsteps = [{ click = \"Go\" }]\n",
+        PathBuf::from("tests"),
+    )
+    .unwrap_err();
+    assert!(per_launch.contains("[launch]"), "{per_launch}");
 }
 
 #[test]
@@ -156,6 +186,20 @@ fn drag_and_slider_check_to() {
 fn camera_moves() {
     assert!(error(r#"{ camera = "closeup" }"#).contains("not a camera move"));
     assert!(error(r#"{ camera = { focus = "Theme", zoom = 3.0 } }"#).contains("max_zoom"));
+    let story =
+        parse(r#"{ camera = { focus_at = [420, 360], zoom = 1.6, window = "Main" } }"#).unwrap();
+    assert_eq!(
+        story.scenes[0].steps[0].action,
+        Action::Camera(CameraMove::FocusAt {
+            spot: matinee::story::Spot {
+                x: 420.0,
+                y: 360.0,
+                window: Some("Main".into()),
+            },
+            zoom: Some(1.6),
+        })
+    );
+    assert!(error(r#"{ camera = { focus_at = [420, 360], zoom = 3.0 } }"#).contains("max_zoom"));
 }
 
 #[test]

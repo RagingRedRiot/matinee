@@ -1,5 +1,10 @@
 //! The isolation boundary every story runs in.
 //!
+//! It keeps personal and identifying details about the user and their
+//! machine out of recordings. It is not a sandbox for untrusted or
+//! malicious software and is not built to withstand a program trying to
+//! escape.
+//!
 //! matinee builds it directly from Linux namespaces: a user namespace that
 //! maps only the caller's own user and group, plus private mount, PID,
 //! network, IPC, and hostname namespaces. Inside, the filesystem is a fresh
@@ -12,8 +17,13 @@
 //! The project is the nearest folder above the storyboard that holds a
 //! `.git`. Without one, or when that folder is the home folder or `/`, only
 //! the storyboard's own folder is shown, so the boundary never quietly
-//! widens to the whole home. The only network is a loopback interface shared by
-//! everything inside, so a terminal command can reach a GUI app.
+//! widens to the whole home. By default, the only network is a loopback
+//! interface shared by everything inside, so a terminal command can reach a
+//! GUI app. A story that opts into the network also gets an interface that
+//! `pasta` (from passt) connects to the outside through the host's sockets.
+//! The namespace stays private, so the host's localhost services and its
+//! abstract Unix sockets, such as its X display, remain out of reach. Other
+//! hosts, including the local network, are reachable.
 //!
 //! The work runs as PID 1 of the new PID namespace. When it returns, the
 //! kernel stops every process left inside, including daemons that detached.
@@ -46,6 +56,9 @@ pub const PROJECT: &str = "/project";
 pub const WORK: &str = "/work";
 const HOSTNAME: &str = "matinee";
 const MACHINE_ID: &str = "6d6174696e656500000000000000000a";
+/// The name server a networked session uses; pasta forwards its queries to
+/// the host's resolver, even one that listens on the host's loopback.
+const PASTA_DNS: &str = "169.254.1.1";
 
 /// System configuration that apps need to start, shown read-only. Entries
 /// the host lacks are skipped.
@@ -89,6 +102,8 @@ pub struct Boundary {
     work_dir: PathBuf,
     /// Whether the work runs inside namespaces.
     isolated: bool,
+    /// Whether the isolated session reaches the outside through `pasta`.
+    network: bool,
     /// The home, runtime, and work folders, as the session sees them.
     home: PathBuf,
     runtime: PathBuf,
@@ -157,6 +172,7 @@ impl Boundary {
             path: path_dirs,
             work_dir: fs::canonicalize(work_dir)?,
             isolated: true,
+            network: story.session.network,
             home: HOME.into(),
             runtime: format!("/run/user/{}", unsafe { libc::getuid() }).into(),
             work: WORK.into(),
@@ -266,11 +282,33 @@ impl Boundary {
         let mut fds = [0; 2];
         check(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) })?;
         let [read_end, write_end] = fds;
+        // With network access, the child says through `ready` that its
+        // namespaces exist, then waits on `go` until pasta has connected
+        // them. Pasta must not start sooner, or it would join the host's.
+        let (mut ready, mut go) = ([-1; 2], [-1; 2]);
+        if self.network {
+            check(unsafe { libc::pipe2(ready.as_mut_ptr(), libc::O_CLOEXEC) })?;
+            check(unsafe { libc::pipe2(go.as_mut_ptr(), libc::O_CLOEXEC) })?;
+        }
+        let ([ready_read, ready_write], [go_read, go_write]) = (ready, go);
 
         match check(unsafe { libc::fork() })? {
             0 => {
                 unsafe { libc::close(read_end) };
-                let code = match enter_namespaces(uid, gid) {
+                let code = match enter_namespaces(uid, gid).and_then(|()| {
+                    if self.network {
+                        unsafe {
+                            libc::close(ready_read);
+                            libc::close(go_write);
+                        }
+                        signal(ready_write)?;
+                        if !await_signal(go_read) {
+                            // The parent reports why.
+                            unsafe { libc::_exit(125) }
+                        }
+                    }
+                    Ok(())
+                }) {
                     Ok(()) => run_init(
                         write_end,
                         || {
@@ -289,6 +327,25 @@ impl Boundary {
             }
             child => {
                 unsafe { libc::close(write_end) };
+                if self.network {
+                    unsafe {
+                        libc::close(ready_write);
+                        libc::close(go_read);
+                    }
+                    // Without the signal, the child failed before it was
+                    // ready and reports why below.
+                    if await_signal(ready_read) {
+                        if let Err(e) = start_pasta(child) {
+                            unsafe { libc::close(go_write) };
+                            read_all(read_end);
+                            wait(child)?;
+                            return Err(e);
+                        }
+                        signal(go_write)?;
+                    } else {
+                        unsafe { libc::close(go_write) };
+                    }
+                }
                 let message = read_all(read_end);
                 let status = wait(child)?;
                 if !message.is_empty() {
@@ -427,6 +484,73 @@ fn run_init(
     wait(pid).unwrap_or(125)
 }
 
+/// Connect the network namespace of `pid` to the outside. Pasta configures
+/// the interface, then carries on in the background and exits on its own
+/// once the namespace is gone.
+fn start_pasta(pid: libc::pid_t) -> io::Result<()> {
+    let output = Command::new("pasta")
+        .args(["--quiet", "--config-net", "--dns-forward", PASTA_DNS])
+        // Keep the host's loopback out of reach, and forward no ports in
+        // either direction: pasta's default would join the session's
+        // localhost to the host's.
+        .args([
+            "--no-map-gw",
+            "-t",
+            "none",
+            "-u",
+            "none",
+            "-T",
+            "none",
+            "-U",
+            "none",
+        ])
+        .arg(pid.to_string())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| {
+            if e.kind() == io::ErrorKind::NotFound {
+                io::Error::other(
+                    "[session] network = true needs pasta, from the passt package; \
+                     install it, or pass --no-isolation to use the host network \
+                     without isolation",
+                )
+            } else {
+                io::Error::new(e.kind(), format!("starting pasta: {e}"))
+            }
+        })?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "pasta could not connect the session's network: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
+/// Send one byte, which [`await_signal`] on the other end receives.
+fn signal(fd: libc::c_int) -> io::Result<()> {
+    let sent = unsafe { libc::write(fd, [1u8].as_ptr().cast(), 1) };
+    unsafe { libc::close(fd) };
+    if sent == 1 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// Wait for [`signal`]; false if the other end closed without sending it.
+fn await_signal(fd: libc::c_int) -> bool {
+    let mut byte = 0u8;
+    let n = loop {
+        let n = unsafe { libc::read(fd, (&mut byte as *mut u8).cast(), 1) };
+        if n >= 0 || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+            break n;
+        }
+    };
+    unsafe { libc::close(fd) };
+    n == 1
+}
+
 fn report(fd: libc::c_int, message: &str) -> i32 {
     unsafe {
         libc::write(fd, message.as_ptr().cast(), message.len());
@@ -476,6 +600,17 @@ fn build_root(b: &Boundary, exe: &Path, uid: libc::uid_t, gid: libc::gid_t) -> i
         let host = old(&Path::new("/etc").join(name));
         if host.exists() {
             bind(&host, &new(&format!("etc/{name}")), true)?;
+        }
+    }
+    if b.network {
+        // The host's resolver may listen on its own loopback, which the
+        // session cannot reach; pasta forwards from this address instead.
+        fs::write(new("etc/resolv.conf"), format!("nameserver {PASTA_DNS}\n"))?;
+        for name in ["ssl/certs", "ssl/openssl.cnf", "gai.conf"] {
+            let host = old(&Path::new("/etc").join(name));
+            if host.exists() {
+                bind(&host, &new(&format!("etc/{name}")), true)?;
+            }
         }
     }
     fs::write(new("etc/hostname"), format!("{HOSTNAME}\n"))?;

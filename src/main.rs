@@ -19,7 +19,9 @@ commands:
           demo.output with -light or -dark added; with folders, or none for
           the current folder, record every storyboard found in them
   shell   run a command, or bash, inside the isolated session a storyboard
-          gets: its project at /project, a throwaway home, and no network
+          gets: its project at /project, a throwaway home, and only its own
+          loopback network, unless [session] network = true reaches out
+          through pasta
   snapshot  start the storyboard's apps, or a command, in that session and
           save a picture of the screen once it settles
   probe   start them the same way and list what steps can target: each

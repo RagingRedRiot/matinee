@@ -28,6 +28,8 @@ pub struct Session<'a> {
     pub buses: Buses,
     /// Launched programs, by launch name.
     children: Vec<(String, Child)>,
+    /// Xwayland's display, for `DISPLAY`, when a launch needs X11.
+    x11_display: Option<String>,
     period: Duration,
     /// When the session started, for pacing frames in real time.
     started: Instant,
@@ -62,6 +64,11 @@ impl<'a> Session<'a> {
             (story.demo.size[0], story.demo.size[1]),
             story.demo.scale,
         )?;
+        let x11_display = if story.launches.iter().any(|l| l.x11) {
+            Some(format!(":{}", compositor.start_xwayland(&runtime)?))
+        } else {
+            None
+        };
         let [w, h] = story.demo.size.map(|n| n as f32);
         let terminal = if story.has_terminal() {
             let pane = &story.terminal;
@@ -92,6 +99,7 @@ impl<'a> Session<'a> {
             compositor,
             buses,
             children: vec![],
+            x11_display,
             period: Duration::from_secs(1) / story.demo.fps,
             started: Instant::now(),
             frames: 0,
@@ -117,6 +125,28 @@ impl<'a> Session<'a> {
     /// steps as `name`.
     /// A leading `~/` in `program` means the session's home folder.
     pub fn spawn(&mut self, name: &str, program: &str, args: &[String]) -> io::Result<()> {
+        let env = owned(app_env(&self.buses));
+        self.spawn_with(name, program, args, env)
+    }
+
+    /// Start a program under Xwayland, known to steps as `name`.
+    pub fn spawn_x11(&mut self, name: &str, program: &str, args: &[String]) -> io::Result<()> {
+        let display = self
+            .x11_display
+            .clone()
+            .ok_or_else(|| io::Error::other("Xwayland is not running"))?;
+        let mut env = owned(x11_env(&self.buses));
+        env.push(("DISPLAY".into(), display));
+        self.spawn_with(name, program, args, env)
+    }
+
+    fn spawn_with(
+        &mut self,
+        name: &str,
+        program: &str,
+        args: &[String],
+        env: Vec<(String, String)>,
+    ) -> io::Result<()> {
         let program = match program.strip_prefix("~/") {
             Some(rest) => format!("{}/{rest}", self.boundary.home().display()),
             None => program.to_owned(),
@@ -126,7 +156,7 @@ impl<'a> Session<'a> {
             .boundary
             .command(program)
             .args(args)
-            .envs(app_env(&self.buses))
+            .envs(env)
             .spawn()
             .map_err(|e| io::Error::new(e.kind(), format!("{program}: {e}")))?;
         self.children.push((name.to_owned(), child));
@@ -149,12 +179,6 @@ impl<'a> Session<'a> {
     /// Run the storyboard's seed commands, in order, before any app starts.
     pub fn seed(&mut self, story: &Story) -> io::Result<()> {
         for (i, seed) in story.seeds.iter().enumerate() {
-            if seed.network {
-                return Err(io::Error::other(format!(
-                    "seed {}: network access is not supported yet",
-                    i + 1
-                )));
-            }
             let mut child = self
                 .boundary
                 .command("bash")
@@ -213,7 +237,11 @@ impl<'a> Session<'a> {
     /// Start every app the storyboard launches.
     pub fn launch(&mut self, story: &Story) -> io::Result<()> {
         for launch in &story.launches {
-            self.spawn(&launch.name, &launch.app, &launch.args)?;
+            if launch.x11 {
+                self.spawn_x11(&launch.name, &launch.app, &launch.args)?;
+            } else {
+                self.spawn(&launch.name, &launch.app, &launch.args)?;
+            }
         }
         Ok(())
     }
@@ -402,6 +430,17 @@ impl<'a> Session<'a> {
     }
 }
 
+impl Drop for Session<'_> {
+    /// Stop launched apps before the display and buses they use go away,
+    /// so they do not report a lost connection on the way out.
+    fn drop(&mut self) {
+        for (_, child) in &mut self.children {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 /// Environment for programs in the session: the display, the buses, and
 /// the settings that make toolkits use them.
 fn app_env(buses: &Buses) -> Vec<(&str, &str)> {
@@ -414,6 +453,27 @@ fn app_env(buses: &Buses) -> Vec<(&str, &str)> {
         ("MOZ_ENABLE_WAYLAND", "1"),
         ("ELECTRON_OZONE_PLATFORM_HINT", "wayland"),
         // GTK's own settings come from the keyfile written at start.
+        ("GSETTINGS_BACKEND", "keyfile"),
+    ];
+    env.extend(buses.env());
+    env
+}
+
+fn owned(env: Vec<(&str, &str)>) -> Vec<(String, String)> {
+    env.into_iter()
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect()
+}
+
+/// Environment for X11 apps: the buses and settings, without the Wayland
+/// display, so toolkits that support both use X11. `DISPLAY` is added by
+/// the caller.
+fn x11_env(buses: &Buses) -> Vec<(&str, &str)> {
+    let mut env = vec![
+        ("XDG_SESSION_TYPE", "x11"),
+        ("GDK_BACKEND", "x11"),
+        ("QT_QPA_PLATFORM", "xcb"),
+        ("SDL_VIDEODRIVER", "x11"),
         ("GSETTINGS_BACKEND", "keyfile"),
     ];
     env.extend(buses.env());

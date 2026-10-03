@@ -21,18 +21,24 @@ matinee should record:
    hand to redo.
 2. **The real thing, never a mockup.** matinee drives the actual program
    against seeded, isolated state. Overlays draw only what a recording
-   cannot show (the pointer, a terminal pane, captions), and anything an
-   overlay shows happening must really happen.
+   cannot show (the pointer, a terminal pane, captions). What surrounds the
+   program can be staged: a terminal step can show the command a user would
+   type, such as a `gh` query, while running a fixture-backed stand-in, or
+   show canned output for a service the demo should not depend on. Staging is
+   declared in the storyboard, and whatever does run is checked.
 3. **Find things by meaning, not by pixels.** Steps name what they act on,
    "click Inbox", through the accessibility tree, the same names a screen
-   reader uses. Scripts survive layout changes, and a demo that cannot find
-   its target fails loudly instead of clicking the wrong spot.
-4. **The same script makes the same recording.** Fixed window size, scale,
+   reader uses. Scripts survive layout changes, and a missing or ambiguous
+   target fails loudly. Window-relative coordinates are an explicit fallback
+   for apps without useful accessibility data.
+4. **The same script tells the same story.** Fixed window size, scale,
    and theme; a pinned clock so "updated 3s ago" never ticks; seeded data in
-   a throwaway home. A re-record changes only what the software changed.
+   a throwaway home. Visual stability is measured under a pinned environment;
+   byte identity is a separate, stronger goal.
 5. **Small and sharp.** Recordings belong in READMEs, so they are encoded to
    load fast: only changed regions stored, holds as single long frames, one
-   palette per clip, and video formats where GIF is too heavy.
+   palette per clip. Video can be explored later if a story cannot stay small
+   enough as a GIF.
 6. **Both themes.** Every demo records in light and dark, for a README
    `<picture>` that matches the reader.
 7. **Quiet to run.** One command, no desktop session, no interaction, no
@@ -54,8 +60,11 @@ size = [1200, 720]
 themes = ["light", "dark"]
 clock = "2026-10-01T09:00:00Z"        # pinned
 
-[setup]                              # off camera, in a throwaway $HOME
-run = ["callboard put reviews < fixtures/reviews.json", "callboard board add Inbox"]
+[[seed]]                             # before app launch, in a throwaway $HOME
+run = "callboard put reviews < fixtures/reviews.json"
+
+[[seed]]
+run = "callboard board add Inbox"
 
 [launch]
 app = "callboard-gui"
@@ -69,6 +78,7 @@ ease = "0.6s"
 [[scene]]
 caption = "A script posts its feed"
 steps = [
+  # shown in the terminal / actually run
   { terminal = "gh search prs … | callboard put reviews", run = "callboard put reviews < fixtures/new-pr.json" },
   { wait_for = "Fix flaky upload retry" },
   { hover = "Fix flaky upload retry", hold = "2.4s" },
@@ -93,19 +103,22 @@ steps = [
 
 ## How it works (planned)
 
-- **Session:** each demo runs in a headless desktop session (a nested Wayland
-  compositor such as cage or weston in headless mode, or Xvfb), with an
-  isolated `$HOME` and XDG directories and a pinned clock.
-- **Targets:** the accessibility tree (AT-SPI on Linux) finds widgets by name
-  and role, and gives their on-screen rectangles. egui, GTK, Qt, and browsers
-  all publish one.
+- **Session:** each demo runs in a headless desktop session, with seeded
+  state, a pinned clock, and a process and filesystem boundary that has been
+  tested against apps that ignore XDG paths. The compositor and the
+  boundary are built into matinee, not external tools.
+- **Targets:** the accessibility tree (AT-SPI on Linux) finds widgets by name,
+  role, and context where the app publishes one. An explicit window-relative
+  fallback serves apps without a usable tree.
 - **Input:** real pointer and keyboard events injected into the session,
   with eased pointer movement so it reads as a person.
 - **Terminal:** a real pseudo-terminal rendered by matinee, either as the
-  whole frame (a terminal demo) or as an overlay pane (a mixed story).
+  whole frame (a terminal demo) or as an overlay pane (a mixed story). A
+  step can display a different command than it runs, or play back canned
+  output, so demos need no live accounts or services.
 - **Capture and encode:** frames from the compositor, deduplicated, then
-  GIF (palette per clip, changed rectangles only, holds merged into long
-  frames) or WebM/MP4, plus a poster PNG.
+  a GIF (palette per clip, changed rectangles only, holds merged into long
+  frames). Video and a poster are possible later outputs.
 - **In-process driver:** for apps that can link a test harness (egui with
   egui_kittest, as in the prototype), a precise mode with no compositor at
   all.
@@ -116,7 +129,8 @@ The app is rendered at twice the output resolution (or more), and every
 output frame is a crop of that canvas, so a zoomed view stays sharp instead
 of upscaled. The camera is a rectangle over the canvas, moved by a smoothing
 spring rather than cut, and it is planned from the script, not guessed from
-the pixels:
+the pixels. Camera and pointer motion run on the recording's frame timeline,
+not wall-clock time, so the same story produces the same camera path:
 
 - **Auto framing.** Before each step matinee knows the target's rectangle
   from the accessibility tree. Clicking a button, typing into a field, or
@@ -138,34 +152,40 @@ the pixels:
   captions are drawn after cropping, at output resolution, so they do not
   grow or blur with the zoom.
 
-Zooming changes every pixel of a frame, which GIF stores expensively. Demos
-with a busy camera are a better fit for WebM or MP4 wherever the page can
-play video (which hosts play video embedded in a README, and how, is to be
-checked when building this); GIF output should keep camera moves short and
-few. matinee should report each output's size per scene so this trade-off is
-visible.
+Zooming changes every pixel of a frame, which GIF stores expensively. Keep
+camera moves short and few, and measure whether the result is legible at
+README width. matinee should report GIF size per scene so camera behavior
+can be tuned against a concrete size budget. Video is a possible later
+escape hatch, not a requirement for the first release.
 
 ## Plan
 
-1. **Encoder and frame pipeline.** Lift the prototype's encoding into a
-   library: transparent-margin cropping, frame deduplication into long
-   frames, GIF and WebM output, light and dark. Measure against the
-   prototype's 1.3 MB.
-2. **Storyboard format and runner** for the in-process egui driver, so
-   callboard's demo becomes a TOML file instead of Rust.
-3. **Terminal driver**, so cued's VHS tape can move to matinee.
-4. **Headless session driver** with AT-SPI targets and input injection, for
-   any Linux GUI.
-5. **Mixed stories**, terminal pane plus GUI, as one scene.
-6. **The camera:** supersampled capture, spring-smoothed crop, auto framing
-   from target rectangles, explicit camera steps, and overlays drawn after
-   the crop. The in-process egui driver can prototype it first, since it
-   already renders at any scale and knows every target's rectangle.
-7. **CI recipe:** re-record on release and fail when a target goes missing.
+The working contracts, experiment results, and remaining gates are in
+[BUILD-DECISIONS.md](BUILD-DECISIONS.md). The implementation order is:
+
+1. **Carry the proven contracts into the runner.** Use callboard's GitHub GIFs
+   as the output reference. Reproduce the tested isolation boundary with the
+   chosen implementation and treat story correctness as the hard CI gate;
+   attach visual changes for review.
+2. **One complete story.** Seed before launch, run a real terminal command,
+   check its exit status, select one GUI target, assert the result, and record
+   it with both fixed and moving camera views.
+3. **Storyboard and authoring.** Make target context, windows, timeouts,
+   assertions, fixture paths, themes, and useful failure diagnostics part of
+   one format. Let `probe` show what a writer can target.
+4. **Drivers.** Support a terminal-only story, an in-process driver where an
+   app can link one, and a headless Linux session for external GUI apps.
+5. **Frame pipeline and camera.** Supersampled capture, calm automatic and
+   explicit framing, overlays after cropping, frame deduplication, GIF
+   output, and per-scene size reporting. Decide encoder details using
+   moving-camera stories.
+6. **CI recipe.** Re-record on release, fail on broken stories, and present
+   visual changes for review.
 
 ## Not goals
 
 - Screen recording of a live desktop. matinee performs scripts; it does not
   capture what you happen to do.
 - Video editing. Captions and overlays, yes; timelines and effects, no.
-- Faking output. If the demo shows it, the software did it.
+- Faking the program. Inputs from outside it may be staged, but what the
+  demoed program shows, it really did.

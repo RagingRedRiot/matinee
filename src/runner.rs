@@ -19,10 +19,11 @@
 
 use crate::{
     a11y::{A11y, App, Node},
+    camera::Rect as CameraRect,
     compositor::BUTTON_LEFT,
     keys,
     session::Session,
-    story::{Action, Step, Story, Target},
+    story::{Action, CameraMove, Step, Story, Target},
 };
 use std::{
     collections::HashSet,
@@ -185,12 +186,32 @@ impl<'r, 'b> Runner<'r, 'b> {
             }
             Action::Hover(target) => {
                 let found = self.wait_until(target, step.timeout.unwrap_or(FIND_TIMEOUT), false)?;
+                self.frame(rect(found.rect), None).map_err(io)?;
                 self.move_to(found.point, TRAVEL).map_err(io)?;
             }
             Action::Click(target) => {
                 let found = self.wait_until(target, step.timeout.unwrap_or(FIND_TIMEOUT), false)?;
+                self.frame(rect(found.rect), None).map_err(io)?;
                 self.move_to(found.point, TRAVEL).map_err(io)?;
                 self.click().map_err(io)?;
+            }
+            Action::HoverAt(spot) => {
+                let point = self.spot(spot)?;
+                self.frame(around(point), None).map_err(io)?;
+                self.move_to(point, TRAVEL).map_err(io)?;
+            }
+            Action::ClickAt(spot) => {
+                let point = self.spot(spot)?;
+                self.frame(around(point), None).map_err(io)?;
+                self.move_to(point, TRAVEL).map_err(io)?;
+                self.click().map_err(io)?;
+            }
+            Action::DragAt { from, to } => {
+                let (start, end) = (self.spot(from)?, self.spot(to)?);
+                self.frame(around(start).union(around(end)), None)
+                    .map_err(io)?;
+                self.move_to(start, TRAVEL).map_err(io)?;
+                self.drag(end).map_err(io)?;
             }
             Action::Type(text) => {
                 self.need_window("type")?;
@@ -208,13 +229,22 @@ impl<'r, 'b> Runner<'r, 'b> {
                 self.session.run_for(PER_KEY).map_err(io)?;
             }
             Action::Pause => {}
-            // The camera only matters once frames are recorded.
-            Action::Camera(_) => {}
+            Action::Camera(CameraMove::Overview) => {
+                let moved = self.session.camera.overview();
+                self.settle_camera(moved).map_err(io)?;
+            }
+            Action::Camera(CameraMove::Focus { target, zoom }) => {
+                let found = self.wait_until(target, step.timeout.unwrap_or(FIND_TIMEOUT), false)?;
+                self.frame(rect(found.rect), *zoom).map_err(io)?;
+            }
             Action::Run {
                 command,
                 shown,
                 exit,
             } => {
+                // What a command causes is usually elsewhere on screen.
+                let moved = self.session.camera.overview();
+                self.settle_camera(moved).map_err(io)?;
                 self.type_command(shown.as_deref().unwrap_or(command))?;
                 let terminal = self.terminal()?;
                 terminal.run(command).map_err(io)?;
@@ -243,6 +273,8 @@ impl<'r, 'b> Runner<'r, 'b> {
             Action::Playback { shown, output } => {
                 let text = std::fs::read_to_string(self.session.story_dir().join(output))
                     .map_err(|e| format!("{}: {e}", output.display()))?;
+                let moved = self.session.camera.overview();
+                self.settle_camera(moved).map_err(io)?;
                 self.type_command(shown)?;
                 let terminal = self.terminal()?;
                 terminal.show(&text.replace('\n', "\r\n"));
@@ -252,12 +284,16 @@ impl<'r, 'b> Runner<'r, 'b> {
             Action::Drag { from, to } => {
                 let timeout = step.timeout.unwrap_or(FIND_TIMEOUT);
                 let source = self.wait_until(from, timeout, false)?;
+                let target = self.wait_until(to, timeout, false)?;
+                self.frame(rect(source.rect).union(rect(target.rect)), None)
+                    .map_err(io)?;
                 self.move_to(source.point, TRAVEL).map_err(io)?;
                 let target = self.wait_until(to, timeout, false)?;
                 self.drag(target.point).map_err(io)?;
             }
             Action::DragSlider { target, to } => {
                 let found = self.wait_until(target, step.timeout.unwrap_or(FIND_TIMEOUT), false)?;
+                self.frame(rect(found.rect), None).map_err(io)?;
                 let (current, min, max) = found.value.ok_or_else(|| {
                     format!("\"{}\" is not a slider that reports its value", target.name)
                 })?;
@@ -283,6 +319,46 @@ impl<'r, 'b> Runner<'r, 'b> {
             self.session.run_for(hold).map_err(io)?;
         }
         Ok(())
+    }
+
+    /// Where a window-relative point is on the output. The window is the
+    /// one with the spot's exact title, or the only one open.
+    fn spot(&self, spot: &crate::story::Spot) -> Result<(f64, f64), String> {
+        let windows = self.session.compositor.windows();
+        let titles = || {
+            windows
+                .iter()
+                .map(|w| format!("\"{}\"", w.title))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let window = match &spot.window {
+            Some(title) => windows
+                .iter()
+                .find(|w| &w.title == title)
+                .ok_or_else(|| format!("no window is titled \"{title}\"; windows: {}", titles()))?,
+            None => match windows.as_slice() {
+                [only] => only,
+                [] => return Err("no window is open".into()),
+                _ => {
+                    return Err(format!(
+                        "{} windows are open; name one with `window`: {}",
+                        windows.len(),
+                        titles()
+                    ));
+                }
+            },
+        };
+        let (w, h) = (window.rect.size.w as f64, window.rect.size.h as f64);
+        let x = if spot.x < 0.0 { w + spot.x } else { spot.x };
+        let y = if spot.y < 0.0 { h + spot.y } else { spot.y };
+        if !(0.0..w).contains(&x) || !(0.0..h).contains(&y) {
+            return Err(format!(
+                "[{}, {}] is outside \"{}\", which is {w}x{h}",
+                spot.x, spot.y, window.title
+            ));
+        }
+        Ok((window.rect.loc.x as f64 + x, window.rect.loc.y as f64 + y))
     }
 
     fn terminal(&mut self) -> Result<&mut crate::terminal::Terminal, String> {
@@ -314,6 +390,21 @@ impl<'r, 'b> Runner<'r, 'b> {
             return Err(format!(
                 "a `{step}` step needs an app window to type into; terminal commands are `run` steps"
             ));
+        }
+        Ok(())
+    }
+
+    /// Point the camera at `focus`, and let it get there before anything
+    /// else moves.
+    fn frame(&mut self, focus: CameraRect, zoom: Option<f64>) -> io::Result<()> {
+        let moved = self.session.camera.frame(focus, zoom);
+        self.settle_camera(moved)
+    }
+
+    /// Run frames until the camera has finished a move it just started.
+    fn settle_camera(&mut self, moved: bool) -> io::Result<()> {
+        while moved && !self.session.camera.settled() {
+            self.session.tick()?;
         }
         Ok(())
     }
@@ -609,6 +700,16 @@ fn same_role(a: &str, b: &str) -> bool {
         || ALIASES
             .iter()
             .any(|group| group.contains(&a.as_str()) && group.contains(&b.as_str()))
+}
+
+/// A found target's rectangle, for the camera.
+fn rect((x, y, w, h): (f64, f64, f64, f64)) -> CameraRect {
+    CameraRect::new(x, y, w, h)
+}
+
+/// A small area around a point given by coordinates, for the camera.
+fn around((x, y): (f64, f64)) -> CameraRect {
+    CameraRect::new(x - 40.0, y - 25.0, 80.0, 50.0)
 }
 
 /// The last lines of a terminal screen, for a diagnostic.

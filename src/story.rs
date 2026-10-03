@@ -181,12 +181,30 @@ pub enum Action {
         target: Target,
         to: f64,
     },
+    /// Explicit control, for things with no accessible name: a point in a
+    /// window rather than a named target.
+    HoverAt(Spot),
+    ClickAt(Spot),
+    DragAt {
+        from: Spot,
+        to: Spot,
+    },
     Type(String),
     /// A key chord such as `ctrl+k` or `enter`.
     Key(String),
     Camera(CameraMove),
     /// Only a hold.
     Pause,
+}
+
+/// A point in a window, in points from its top-left corner; a negative
+/// coordinate counts from the right or bottom edge.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Spot {
+    pub x: f64,
+    pub y: f64,
+    /// The window's exact title; needed when more than one is open.
+    pub window: Option<String>,
 }
 
 impl Action {
@@ -376,6 +394,10 @@ struct RawStep {
     click: Option<String>,
     drag: Option<String>,
     drag_slider: Option<String>,
+    hover_at: Option<[f64; 2]>,
+    click_at: Option<[f64; 2]>,
+    drag_from: Option<[f64; 2]>,
+    drag_to: Option<[f64; 2]>,
     to: Option<RawTo>,
     to_role: Option<String>,
     to_within: Option<String>,
@@ -503,7 +525,7 @@ impl RawStory {
         let camera = Camera {
             mode: c.mode.unwrap_or(CameraMode::Auto),
             max_zoom,
-            ease: duration("camera.ease", c.ease)?.unwrap_or(Duration::from_millis(600)),
+            ease: duration("camera.ease", c.ease)?.unwrap_or(Duration::from_millis(400)),
         };
 
         if self.scene.is_empty() {
@@ -591,6 +613,9 @@ impl RawStep {
             ("click", self.click.is_some()),
             ("drag", self.drag.is_some()),
             ("drag_slider", self.drag_slider.is_some()),
+            ("hover_at", self.hover_at.is_some()),
+            ("click_at", self.click_at.is_some()),
+            ("drag_from", self.drag_from.is_some()),
             ("type", self.type_text.is_some()),
             ("key", self.key.is_some()),
             ("camera", self.camera.is_some()),
@@ -618,6 +643,8 @@ impl RawStep {
         only_with("to", self.to.is_some(), &["drag", "drag_slider"])?;
         only_with("to_role", self.to_role.is_some(), &["drag"])?;
         only_with("to_within", self.to_within.is_some(), &["drag"])?;
+        only_with("drag_to", self.drag_to.is_some(), &["drag_from"])?;
+        let at = ["hover_at", "click_at", "drag_from"];
         let targeted = [
             "wait_for",
             "expect",
@@ -634,7 +661,13 @@ impl RawStep {
             ("in", self.app.is_some()),
         ];
         for (key, set) in context {
+            if key == "window" && action.is_some_and(|a| at.contains(&a)) {
+                continue;
+            }
             only_with(key, set, &targeted)?;
+        }
+        if action.is_some_and(|a| at.contains(&a)) && launches.is_empty() {
+            return Err("this step acts on an app window, but the storyboard launches none".into());
         }
 
         // A plain `wait_for` or `expect` may be text in the terminal pane.
@@ -734,6 +767,41 @@ impl RawStep {
                 Action::DragSlider {
                     target: target(self.drag_slider.take().unwrap(), &mut self),
                     to,
+                }
+            }
+            Some("hover_at") => {
+                let [x, y] = self.hover_at.unwrap();
+                Action::HoverAt(Spot {
+                    x,
+                    y,
+                    window: self.window.take(),
+                })
+            }
+            Some("click_at") => {
+                let [x, y] = self.click_at.unwrap();
+                Action::ClickAt(Spot {
+                    x,
+                    y,
+                    window: self.window.take(),
+                })
+            }
+            Some("drag_from") => {
+                let [x, y] = self.drag_from.unwrap();
+                let Some([tx, ty]) = self.drag_to else {
+                    return Err("`drag_from` needs `drag_to`, where to let go".into());
+                };
+                let window = self.window.take();
+                Action::DragAt {
+                    from: Spot {
+                        x,
+                        y,
+                        window: window.clone(),
+                    },
+                    to: Spot {
+                        x: tx,
+                        y: ty,
+                        window,
+                    },
                 }
             }
             Some("type") => Action::Type(self.type_text.take().unwrap()),

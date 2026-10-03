@@ -392,6 +392,8 @@ fn record(path: &str) -> ExitCode {
                         let mut runner = Runner::new(&mut session, &story)?;
                         let steps = runner.perform(&story)?;
                         drop(runner);
+                        // End on the whole screen, where the loop restarts.
+                        session.camera.overview();
                         session.run_for(TAIL)?;
                         let recording = session.stop_recording().expect("recording was started");
                         let gif = std::path::Path::new(matinee::boundary::WORK).join("out.gif");
@@ -407,6 +409,24 @@ fn record(path: &str) -> ExitCode {
                             written.seconds,
                             written.bytes / 1024
                         );
+                        let budget = if written.camera_moved {
+                            matinee::record::CAMERA_BUDGET
+                        } else {
+                            matinee::record::BUDGET
+                        };
+                        if written.bytes > budget {
+                            eprintln!(
+                                "matinee: warning: the {} GIF is {} KB, over its {} KB budget{}",
+                                theme.name(),
+                                written.bytes / 1024,
+                                budget / 1024,
+                                if written.camera_moved {
+                                    " for a moving camera"
+                                } else {
+                                    ""
+                                }
+                            );
+                        }
                         0
                     }
                     Err(failure) => {

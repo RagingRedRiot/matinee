@@ -155,9 +155,19 @@ README pattern; no new hosting repository is needed to choose the format.
 Matinee should report GIF size per scene, set a practical per-story budget,
 and check legibility at README width. A particularly motion-heavy story may
 motivate optional video support later, but video playback is not a build gate.
-Start with a provisional warning at 2 MiB per theme, above callboard's
-existing GIFs, then adjust with real Matinee stories. Size alone is not a
-pass: the text acted on must remain legible at 400-pixel display width.
+`record` warns when a GIF is over budget: 2 MiB per theme with a still
+camera, and 5 MiB when the camera moves. Size alone is not a pass: the
+text acted on must remain legible at 400-pixel display width.
+
+The camera's moves are most of a moving GIF's size: a move changes nearly
+every pixel of each frame it spans (callboard's demo measured 3.1 of
+4.5 MB in 42 such frames). So the camera stays put whenever it can. It
+zooms only as far as text needs to read at an 800-pixel display width, so
+an output no wider than that never zooms on its own. It stays while the
+next target is comfortably in view and readable. Each move eases over
+0.4 seconds by default and is stored at half the frame rate. With these,
+callboard's 40-second demo is about 4 MB per theme, against 2.4 MB with a
+fixed camera.
 
 Light and dark come from the session, not the app: matinee serves the desktop
 portal's settings on the session bus (the `color-scheme` that libadwaita,

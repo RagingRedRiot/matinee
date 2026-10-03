@@ -7,7 +7,7 @@
 //! longer frame, each later frame stores only the rectangle that changed,
 //! and the whole clip shares one 256-color palette.
 
-use crate::compositor::Frame;
+use crate::{camera::Rect, compositor::Frame};
 use std::{borrow::Cow, collections::HashMap, io, path::Path};
 
 /// The pointer, drawn with its tip at the top-left: `X` is the outline,
@@ -46,7 +46,15 @@ pub struct Recording {
     images: Vec<Vec<u32>>,
     /// For each tick, the image shown and where the pointer was, if shown.
     ticks: Vec<Tick>,
+    /// For each tick, whether the camera moved since the tick before.
+    moving: Vec<bool>,
+    last_view: Option<Rect>,
 }
+
+/// The size a GIF should stay under, per theme: a moving camera changes
+/// nearly every pixel while it moves, so it gets more room.
+pub const BUDGET: u64 = 2 * 1024 * 1024;
+pub const CAMERA_BUDGET: u64 = 5 * 1024 * 1024;
 
 /// What was written.
 pub struct Written {
@@ -54,6 +62,8 @@ pub struct Written {
     /// Frames in the GIF after merging repeats.
     pub frames: usize,
     pub seconds: f64,
+    /// Whether the camera moved at any point.
+    pub camera_moved: bool,
 }
 
 impl Recording {
@@ -66,29 +76,50 @@ impl Recording {
             height,
             images: vec![],
             ticks: vec![],
+            moving: vec![],
+            last_view: None,
         }
     }
 
-    /// Add one tick: the rendered output, and the pointer in logical
-    /// points when it is shown.
-    pub fn add(&mut self, frame: &Frame, pointer: Option<(f64, f64)>) {
-        let image = downscale(frame, self.scale, self.width, self.height);
+    /// Add one tick: the rendered output, the part of the screen the
+    /// camera shows (in logical points), and the pointer, already placed in
+    /// the output, when it is shown.
+    pub fn add(&mut self, frame: &Frame, view: Rect, pointer: Option<(f64, f64)>) {
+        let whole = view == Rect::new(0.0, 0.0, self.width as f64, self.height as f64);
+        let image = if whole {
+            downscale(frame, self.scale, self.width, self.height)
+        } else {
+            resample(frame, view, self.scale, self.width, self.height)
+        };
         if self.images.last() != Some(&image) {
             self.images.push(image);
         }
         let pointer = pointer.map(|(x, y)| (x.round() as i32, y.round() as i32));
         self.ticks.push((self.images.len() - 1, pointer));
+        self.moving.push(self.last_view.is_some_and(|v| v != view));
+        self.last_view = Some(view);
     }
 
     /// Write the recording as a looping GIF, at `fps` ticks per second.
     pub fn write_gif(&self, path: &Path, fps: u32) -> io::Result<Written> {
         // Runs of ticks that look the same become one frame.
         let mut runs: Vec<(Tick, usize)> = vec![];
-        for &tick in &self.ticks {
+        let mut kept_moving = false;
+        for (i, &tick) in self.ticks.iter().enumerate() {
+            let moving = self.moving[i];
             match runs.last_mut() {
                 Some((last, n)) if *last == tick => *n += 1,
+                // While the camera moves, every other frame is kept: a move
+                // changes nearly every pixel, and half its frames still read
+                // as smooth motion.
+                Some((_, n)) if moving && kept_moving => {
+                    *n += 1;
+                    kept_moving = false;
+                    continue;
+                }
                 _ => runs.push((tick, 1)),
             }
+            kept_moving = moving;
         }
         if runs.is_empty() {
             return Err(io::Error::other("nothing was recorded"));
@@ -167,6 +198,7 @@ impl Recording {
             bytes: std::fs::metadata(path)?.len(),
             frames,
             seconds: written_cs as f64 / 100.0,
+            camera_moved: self.moving.iter().any(|&m| m),
         })
     }
 
@@ -236,6 +268,55 @@ fn downscale(frame: &Frame, scale: usize, width: usize, height: usize) -> Vec<u3
     out
 }
 
+/// The part of `frame` under `view` (logical points, `scale` device pixels
+/// each), averaged down to `width` by `height` pixels. Each output pixel is
+/// the coverage-weighted average of the device pixels under it.
+fn resample(frame: &Frame, view: Rect, scale: usize, width: usize, height: usize) -> Vec<u32> {
+    let s = scale as f64;
+    let cols = spans(view.x * s, view.w * s / width as f64, width, frame.width);
+    let rows = spans(view.y * s, view.h * s / height as f64, height, frame.height);
+    let mut out = Vec::with_capacity(width * height);
+    for row in &rows {
+        for col in &cols {
+            let (mut r, mut g, mut b, mut total) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+            for &(sy, wy) in row {
+                let line = sy * frame.width;
+                for &(sx, wx) in col {
+                    let p = frame.pixels[line + sx];
+                    let w = wx * wy;
+                    r += ((p >> 16) & 0xff) as f64 * w;
+                    g += ((p >> 8) & 0xff) as f64 * w;
+                    b += (p & 0xff) as f64 * w;
+                    total += w;
+                }
+            }
+            let c = |v: f64| (v / total.max(f64::EPSILON)).round().clamp(0.0, 255.0) as u32;
+            out.push((c(r) << 16) | (c(g) << 8) | c(b));
+        }
+    }
+    out
+}
+
+/// For each of `count` output pixels starting at device coordinate `start`
+/// and `step` device pixels wide, the device pixels it covers and how much
+/// of each.
+fn spans(start: f64, step: f64, count: usize, limit: usize) -> Vec<Vec<(usize, f64)>> {
+    (0..count)
+        .map(|i| {
+            let (a, b) = (start + i as f64 * step, start + (i + 1) as f64 * step);
+            let first = (a.floor().max(0.0) as usize).min(limit - 1);
+            let last = (b.ceil() as usize).clamp(first + 1, limit);
+            (first..last)
+                .map(|p| {
+                    let cover = (b.min(p as f64 + 1.0) - a.max(p as f64)).max(0.0);
+                    (p, cover)
+                })
+                .filter(|&(_, w)| w > 0.0)
+                .collect()
+        })
+        .collect()
+}
+
 /// The smallest rectangle holding every pixel that differs, if any.
 fn changed(
     a: &[u8],
@@ -262,12 +343,43 @@ fn changed(
 mod tests {
     use super::*;
 
+    /// The whole of the 20-point test screen.
+    fn all() -> Rect {
+        Rect::new(0.0, 0.0, 20.0, 20.0)
+    }
+
     fn frame(width: usize, height: usize, color: u32) -> Frame {
         Frame {
             width,
             height,
             pixels: vec![color; width * height],
         }
+    }
+
+    #[test]
+    fn resampling_the_whole_screen_matches_the_block_average() {
+        let mut f = frame(8, 4, 0xff000000);
+        for (i, p) in f.pixels.iter_mut().enumerate() {
+            *p = 0xff000000 | ((i as u32 * 37) % 256) << 8;
+        }
+        let whole = Rect::new(0.0, 0.0, 4.0, 2.0);
+        assert_eq!(resample(&f, whole, 2, 4, 2), downscale(&f, 2, 4, 2));
+    }
+
+    #[test]
+    fn resampling_a_zoomed_view_shows_only_that_part() {
+        // Left half white, right half black, at scale 2 on a 4x2 screen.
+        let mut f = frame(8, 4, 0xff000000);
+        for y in 0..4 {
+            for x in 0..4 {
+                f.pixels[y * 8 + x] = 0xffffffff;
+            }
+        }
+        let left = resample(&f, Rect::new(0.0, 0.0, 2.0, 1.0), 2, 4, 2);
+        assert!(left.iter().all(|&p| p == 0xffffff), "{left:x?}");
+        let middle = resample(&f, Rect::new(1.0, 0.0, 2.0, 1.0), 2, 4, 2);
+        assert_eq!(middle[0], 0xffffff);
+        assert_eq!(middle[3], 0x000000);
     }
 
     #[test]
@@ -298,10 +410,10 @@ mod tests {
         // 15 ticks of one image, then 15 of another: one second at 15 fps
         // is 100 centiseconds each.
         for _ in 0..15 {
-            rec.add(&frame(20, 20, 0xff102030), None);
+            rec.add(&frame(20, 20, 0xff102030), all(), None);
         }
         for _ in 0..15 {
-            rec.add(&frame(20, 20, 0xffa0b0c0), None);
+            rec.add(&frame(20, 20, 0xffa0b0c0), all(), None);
         }
         let written = rec.write_gif(&path, 15).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
@@ -337,7 +449,7 @@ mod tests {
             (0xffa0b0c0, Some((-60.0, -60.0))),
         ] {
             for _ in 0..15 {
-                rec.add(&frame(20, 20, color), pointer);
+                rec.add(&frame(20, 20, color), all(), pointer);
             }
         }
         let written = rec.write_gif(&path, 15).unwrap();

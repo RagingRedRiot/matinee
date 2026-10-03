@@ -45,3 +45,14 @@ steps = [
   { terminal = "./nightly-status | callboard put nightly", run = "callboard put nightly < fixtures/nightly-green.json", hold = "0.8s" },
   { expect = "linux-aarch64 · passed in 19m", hold = "2s" },
 ]
+
+[[scene]]
+caption = "Ctrl+K jumps back to anything"
+steps = [
+  # Grab empty canvas in the corner and pull the cards away.
+  { drag_from = [-20, -25], drag_to = [560, 230], hold = "0.6s" },
+  { key = "ctrl+k", hold = "0.6s" },
+  { type = "inbox", hold = "0.8s" },
+  { key = "enter", hold = "2.6s" },
+  { expect = "Inbox (4)" },
+]

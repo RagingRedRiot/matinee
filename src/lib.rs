@@ -9,6 +9,7 @@
 pub mod a11y;
 pub mod boundary;
 pub mod bus;
+pub mod camera;
 pub mod compositor;
 pub mod keys;
 pub mod portal;

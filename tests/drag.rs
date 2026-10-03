@@ -75,3 +75,21 @@ fn drag_slider_refuses_something_that_is_not_a_slider() {
         "{text}"
     );
 }
+
+#[test]
+#[ignore = "needs a C compiler and GTK 4 headers"]
+fn coordinate_steps_act_where_they_say() {
+    // The slider spans x 52 to 772 at y 191 to 225 in the 800x500 window;
+    // its value starts at 20.
+    let (ok, text) = run_drag(
+        "coordinates",
+        r#"{ drag_from = [196, 208], drag_to = [556, 208] }, { expect = "volume: 70" }"#,
+    );
+    assert!(ok, "{text}");
+    let (ok, text) = run_drag("outside", r#"{ click_at = [900, 10] }"#);
+    assert!(!ok);
+    assert!(
+        text.contains("[900, 10] is outside \"Drag lab\", which is 800x500"),
+        "{text}"
+    );
+}

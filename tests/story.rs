@@ -47,7 +47,7 @@ fn defaults() {
     assert_eq!(story.demo.scale, 2);
     assert_eq!(story.demo.fps, 15);
     assert_eq!(story.demo.themes, [Theme::Light, Theme::Dark]);
-    assert_eq!(story.camera.ease, Duration::from_millis(600));
+    assert_eq!(story.camera.ease, Duration::from_millis(400));
     assert_eq!(story.launches[0].name, "watch-file");
 }
 
@@ -174,4 +174,45 @@ fn durations() {
     assert!(parse_duration("2.4").is_err());
     assert!(parse_duration("-1s").is_err());
     assert!(error(r#"{ click = "Go", hold = "2" }"#).contains("hold:"));
+}
+
+#[test]
+fn coordinate_steps() {
+    use matinee::story::Spot;
+    let story = parse(
+        r#"{ click_at = [10, -20], window = "Main" },
+{ hover_at = [5.5, 6] },
+{ drag_from = [-20, -20], drag_to = [560, 230] }"#,
+    )
+    .unwrap();
+    let steps = &story.scenes[0].steps;
+    assert_eq!(
+        steps[0].action,
+        Action::ClickAt(Spot {
+            x: 10.0,
+            y: -20.0,
+            window: Some("Main".into())
+        })
+    );
+    assert_eq!(
+        steps[1].action,
+        Action::HoverAt(Spot {
+            x: 5.5,
+            y: 6.0,
+            window: None
+        })
+    );
+    assert!(matches!(
+        &steps[2].action,
+        Action::DragAt { from, to } if from.x == -20.0 && to.y == 230.0
+    ));
+    assert!(error(r#"{ drag_from = [1, 2] }"#).contains("needs `drag_to`"));
+    assert!(error(r#"{ drag_to = [1, 2] }"#).contains("`drag_to` only applies"));
+    assert!(error(r#"{ click_at = [1, 2], role = "button" }"#).contains("`role` only applies"));
+    let e = Story::parse(
+        "[demo]\noutput = \"d\"\nsize = [1, 1]\n[[scene]]\nsteps = [{ click_at = [1, 1] }]\n",
+        PathBuf::new(),
+    )
+    .unwrap_err();
+    assert!(e.contains("launches none"), "{e}");
 }

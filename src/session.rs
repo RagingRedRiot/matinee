@@ -5,10 +5,11 @@
 use crate::{
     boundary::{Boundary, HOME},
     bus::Buses,
+    camera::{Camera, Rect},
     compositor::{Compositor, Frame},
     portal,
     record::Recording,
-    story::{PanePosition, Story, Theme},
+    story::{CameraMode, PanePosition, Story, Theme},
     terminal::{Pane, Terminal},
 };
 use std::{
@@ -39,6 +40,8 @@ pub struct Session<'a> {
     terminal: Option<(Terminal, Pane)>,
     /// Whether recordings draw the pointer: only once a step has used it.
     pointer_shown: bool,
+    /// What recordings show of the screen.
+    pub camera: Camera,
 }
 
 impl<'a> Session<'a> {
@@ -93,6 +96,13 @@ impl<'a> Session<'a> {
             recording: None,
             terminal,
             pointer_shown: false,
+            camera: Camera::new(
+                w as f64,
+                h as f64,
+                story.camera.max_zoom.min(story.demo.scale as f64),
+                (story.camera.ease.as_secs_f64() * story.demo.fps as f64).round() as u32,
+                story.camera.mode == CameraMode::Fixed,
+            ),
         })
     }
 
@@ -263,13 +273,24 @@ impl<'a> Session<'a> {
         if let Some((terminal, pane)) = &self.terminal {
             pane.draw(terminal, &mut frame, self.scale);
         }
+        self.camera.step();
         if let Some(recording) = &mut self.recording {
-            let pointer = self
-                .pointer_shown
-                .then(|| self.compositor.pointer_location());
-            recording.add(&frame, pointer);
+            let size = (self.size[0] as f64, self.size[1] as f64);
+            let pointer = self.pointer_shown.then(|| {
+                self.camera
+                    .to_output(self.compositor.pointer_location(), size)
+            });
+            recording.add(&frame, self.camera.view(), pointer);
         }
         Ok(frame)
+    }
+
+    /// The terminal pane's rectangle, when the story has one.
+    pub fn pane_rect(&self) -> Option<Rect> {
+        self.terminal.as_ref().map(|(_, pane)| {
+            let (x, y, w, h) = pane.rect;
+            Rect::new(x as f64, y as f64, w as f64, h as f64)
+        })
     }
 
     /// Draw the pointer in recordings from now on.

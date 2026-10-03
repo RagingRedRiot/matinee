@@ -114,6 +114,8 @@ impl Buses {
             .command(program)
             .env("DBUS_SESSION_BUS_ADDRESS", &session)
             .env("AT_SPI_BUS_ADDRESS", &a11y)
+            // It announces itself on every start; errors still show.
+            .stdout(std::process::Stdio::null())
             .spawn()
             .map_err(|e| io::Error::new(e.kind(), format!("{program}: {e}")))?;
         children.push(("at-spi2-registryd", registry));

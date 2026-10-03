@@ -7,6 +7,13 @@
 //! Anything else that leaves zero or several matches fails the step, with a
 //! diagnostic listing what is there instead. A target outside its window's
 //! visible area is refused rather than clicked where it is not.
+//!
+//! `wait_for` and `expect` with no context besides the name also accept
+//! that text showing in the terminal pane.
+//!
+//! A `run` step types its command line into the terminal pane, runs the
+//! command, and fails unless it exits with the expected status. A staged
+//! step types the command it shows and runs the one it names.
 
 use crate::{
     a11y::{A11y, App, Node},
@@ -35,6 +42,10 @@ const CLICK: Duration = Duration::from_millis(80);
 const PER_KEY: Duration = Duration::from_millis(70);
 /// How long an app may take to show its first window.
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long a terminal command may run by default.
+const RUN_TIMEOUT: Duration = Duration::from_secs(30);
+/// The pause between typing a command line and pressing Enter.
+const BEFORE_ENTER: Duration = Duration::from_millis(250);
 
 /// Why a story could not be performed.
 #[derive(Debug)]
@@ -86,6 +97,10 @@ impl<'r, 'b> Runner<'r, 'b> {
     /// Launch the story's apps and wait until each is ready: its `wait_for`
     /// target is showing, or else it has shown a window.
     pub fn launch(&mut self, story: &Story) -> Result<(), Failure> {
+        self.session.seed(story).map_err(|e| Failure {
+            at: "seed".into(),
+            message: e.to_string(),
+        })?;
         self.session.launch(story)?;
         for launch in &story.launches {
             let at = format!("launch {}", launch.name);
@@ -97,7 +112,7 @@ impl<'r, 'b> Runner<'r, 'b> {
                         app: Some(launch.name.clone()),
                         ..Target::default()
                     };
-                    self.wait_until(&target, timeout)
+                    self.wait_until(&target, timeout, false)
                         .map_err(|message| Failure {
                             at: at.clone(),
                             message,
@@ -139,21 +154,22 @@ impl<'r, 'b> Runner<'r, 'b> {
         let io = |e: io::Error| e.to_string();
         match &step.action {
             Action::WaitFor(target) => {
-                self.wait_until(target, step.timeout.unwrap_or(WAIT_TIMEOUT))?;
+                self.wait_until(target, step.timeout.unwrap_or(WAIT_TIMEOUT), true)?;
             }
             Action::Expect(target) => {
-                self.wait_until(target, step.timeout.unwrap_or(EXPECT_TIMEOUT))?;
+                self.wait_until(target, step.timeout.unwrap_or(EXPECT_TIMEOUT), true)?;
             }
             Action::Hover(target) => {
-                let found = self.wait_until(target, step.timeout.unwrap_or(FIND_TIMEOUT))?;
+                let found = self.wait_until(target, step.timeout.unwrap_or(FIND_TIMEOUT), false)?;
                 self.move_to(found.point).map_err(io)?;
             }
             Action::Click(target) => {
-                let found = self.wait_until(target, step.timeout.unwrap_or(FIND_TIMEOUT))?;
+                let found = self.wait_until(target, step.timeout.unwrap_or(FIND_TIMEOUT), false)?;
                 self.move_to(found.point).map_err(io)?;
                 self.click().map_err(io)?;
             }
             Action::Type(text) => {
+                self.need_window("type")?;
                 for c in text.chars() {
                     let press = keys::for_char(c)
                         .ok_or_else(|| format!("`{c}` cannot be typed on the keyboard"))?;
@@ -162,6 +178,7 @@ impl<'r, 'b> Runner<'r, 'b> {
                 }
             }
             Action::Key(chord) => {
+                self.need_window("key")?;
                 let press = keys::chord(chord)?;
                 self.press(&press).map_err(io)?;
                 self.session.run_for(PER_KEY).map_err(io)?;
@@ -169,8 +186,44 @@ impl<'r, 'b> Runner<'r, 'b> {
             Action::Pause => {}
             // The camera only matters once frames are recorded.
             Action::Camera(_) => {}
-            Action::Run { .. } | Action::Playback { .. } => {
-                return Err("terminal steps are not supported yet".into());
+            Action::Run {
+                command,
+                shown,
+                exit,
+            } => {
+                self.type_command(shown.as_deref().unwrap_or(command))?;
+                let terminal = self.terminal()?;
+                terminal.run(command).map_err(io)?;
+                let timeout = step.timeout.unwrap_or(RUN_TIMEOUT);
+                let start = Instant::now();
+                let status = loop {
+                    if let Some(status) = self.terminal()?.finished().map_err(io)? {
+                        break status;
+                    }
+                    if start.elapsed() > timeout {
+                        return Err(format!(
+                            "`{command}` was still running after {timeout:?}; the terminal shows:\n{}",
+                            tail(&self.terminal()?.contents())
+                        ));
+                    }
+                    self.session.tick().map_err(io)?;
+                };
+                self.terminal()?.prompt();
+                if status != *exit {
+                    return Err(format!(
+                        "`{command}` exited with {status}, expected {exit}; the terminal shows:\n{}",
+                        tail(&self.terminal()?.contents())
+                    ));
+                }
+            }
+            Action::Playback { shown, output } => {
+                let text = std::fs::read_to_string(self.session.story_dir().join(output))
+                    .map_err(|e| format!("{}: {e}", output.display()))?;
+                self.type_command(shown)?;
+                let terminal = self.terminal()?;
+                terminal.show(&text.replace('\n', "\r\n"));
+                terminal.prompt();
+                self.session.tick().map_err(io)?;
             }
             Action::Drag { .. } | Action::DragSlider { .. } => {
                 return Err("drag steps are not supported yet".into());
@@ -182,9 +235,43 @@ impl<'r, 'b> Runner<'r, 'b> {
         Ok(())
     }
 
+    fn terminal(&mut self) -> Result<&mut crate::terminal::Terminal, String> {
+        self.session
+            .terminal()
+            .ok_or_else(|| "this story has no terminal pane".to_string())
+    }
+
+    /// Type a command line into the terminal pane, then press Enter.
+    fn type_command(&mut self, line: &str) -> Result<(), String> {
+        let io = |e: io::Error| e.to_string();
+        for c in line.chars() {
+            let text = if c == '\n' {
+                "\r\n> ".to_string()
+            } else {
+                c.to_string()
+            };
+            self.terminal()?.show(&text);
+            self.session.run_for(PER_KEY).map_err(io)?;
+        }
+        self.session.run_for(BEFORE_ENTER).map_err(io)?;
+        self.terminal()?.show("\r\n");
+        Ok(())
+    }
+
+    /// Keys go to the focused window; fail clearly when there is none.
+    fn need_window(&self, step: &str) -> Result<(), String> {
+        if self.session.compositor.windows().is_empty() {
+            return Err(format!(
+                "a `{step}` step needs an app window to type into; terminal commands are `run` steps"
+            ));
+        }
+        Ok(())
+    }
+
     /// Ease the pointer to `point` over [`TRAVEL`].
     fn move_to(&mut self, point: (f64, f64)) -> io::Result<()> {
         let from = self.pointer;
+        self.session.show_pointer();
         let start = self.session.now();
         loop {
             let t = ((self.session.now() - start).as_secs_f64() / TRAVEL.as_secs_f64()).min(1.0);
@@ -233,10 +320,33 @@ impl<'r, 'b> Runner<'r, 'b> {
     }
 
     /// Keep the session running until `target` can be found, and return it.
-    /// After `timeout`, fail with what was found instead.
-    fn wait_until(&mut self, target: &Target, timeout: Duration) -> Result<Found, String> {
+    /// After `timeout`, fail with what was found instead. With `text`, a
+    /// target with no context besides its name may also be text in the
+    /// terminal pane; only steps that check, not act, allow that.
+    fn wait_until(
+        &mut self,
+        target: &Target,
+        timeout: Duration,
+        text: bool,
+    ) -> Result<Found, String> {
         let start = Instant::now();
+        let plain = text
+            && target.role.is_none()
+            && target.within.is_none()
+            && target.near.is_none()
+            && target.window.is_none()
+            && target.app.is_none();
         loop {
+            if plain
+                && self
+                    .session
+                    .terminal()
+                    .is_some_and(|t| t.contains(&target.name))
+            {
+                return Ok(Found {
+                    point: self.pointer,
+                });
+            }
             let attempt = self.find(target);
             match attempt {
                 Ok(found) => return Ok(found),
@@ -390,10 +500,28 @@ impl<'r, 'b> Runner<'r, 'b> {
                 target.name, size.w, size.h
             ));
         }
-        Ok(Found {
-            point: (window.rect.loc.x as f64 + cx, window.rect.loc.y as f64 + cy),
-        })
+        let point = (window.rect.loc.x as f64 + cx, window.rect.loc.y as f64 + cy);
+        let (ax, ay, aw, ah) = self.session.compositor.window_area();
+        let inside = |v: f64, start: i32, len: i32| v >= start as f64 && v < (start + len) as f64;
+        if !inside(point.0, ax, aw) || !inside(point.1, ay, ah) {
+            return Err(format!(
+                "\"{}\" is behind the terminal pane: the window is {}x{} but the space beside the pane is {aw}x{ah}; make the pane smaller or the screen larger",
+                target.name, size.w, size.h
+            ));
+        }
+        Ok(Found { point })
     }
+}
+
+/// The last lines of a terminal screen, for a diagnostic.
+fn tail(contents: &str) -> String {
+    let lines: Vec<&str> = contents.trim_end().lines().collect();
+    let start = lines.len().saturating_sub(8);
+    lines[start..]
+        .iter()
+        .map(|l| format!("  | {l}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Indices of `i`'s ancestors, nearest first.

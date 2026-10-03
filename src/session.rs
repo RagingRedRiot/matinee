@@ -8,7 +8,8 @@ use crate::{
     compositor::{Compositor, Frame},
     portal,
     record::Recording,
-    story::{Story, Theme},
+    story::{PanePosition, Story, Theme},
+    terminal::{Pane, Terminal},
 };
 use std::{
     io,
@@ -34,6 +35,10 @@ pub struct Session<'a> {
     size: [u32; 2],
     scale: u32,
     recording: Option<Recording>,
+    /// The terminal pane, when the story has one.
+    terminal: Option<(Terminal, Pane)>,
+    /// Whether recordings draw the pointer: only once a step has used it.
+    pointer_shown: bool,
 }
 
 impl<'a> Session<'a> {
@@ -45,11 +50,36 @@ impl<'a> Session<'a> {
         let keyfile = Path::new(HOME).join(".config/glib-2.0/settings/keyfile");
         std::fs::create_dir_all(keyfile.parent().unwrap())?;
         std::fs::write(&keyfile, portal::Settings::new(theme).keyfile())?;
-        let compositor = Compositor::new(
+        let mut compositor = Compositor::new(
             &runtime.join(DISPLAY),
             (story.demo.size[0], story.demo.size[1]),
             story.demo.scale,
         )?;
+        let [w, h] = story.demo.size.map(|n| n as f32);
+        let terminal = if story.has_terminal() {
+            let pane = &story.terminal;
+            let rect = match (story.launches.is_empty(), pane.position) {
+                (true, _) => (0.0, 0.0, w, h),
+                (false, PanePosition::Bottom) => {
+                    let size = pane.size.map_or((h * 0.35).round(), |n| n as f32);
+                    compositor.set_window_area(0, 0, w as i32, (h - size) as i32);
+                    (0.0, h - size, w, size)
+                }
+                (false, PanePosition::Right) => {
+                    let size = pane.size.map_or((w * 0.45).round(), |n| n as f32);
+                    compositor.set_window_area(0, 0, (w - size) as i32, h as i32);
+                    (w - size, 0.0, size, h)
+                }
+            };
+            let pane = Pane::new(rect, story.terminal.font_size, theme);
+            let (rows, cols) = pane.grid();
+            Some((
+                Terminal::start(boundary, rows, cols, &app_env(&buses))?,
+                pane,
+            ))
+        } else {
+            None
+        };
         Ok(Session {
             boundary,
             compositor,
@@ -61,6 +91,8 @@ impl<'a> Session<'a> {
             size: story.demo.size,
             scale: story.demo.scale,
             recording: None,
+            terminal,
+            pointer_shown: false,
         })
     }
 
@@ -71,16 +103,7 @@ impl<'a> Session<'a> {
             .boundary
             .command(program)
             .args(args)
-            .env("WAYLAND_DISPLAY", DISPLAY)
-            .env("XDG_SESSION_TYPE", "wayland")
-            .env("GDK_BACKEND", "wayland")
-            .env("QT_QPA_PLATFORM", "wayland")
-            .env("SDL_VIDEODRIVER", "wayland")
-            .env("MOZ_ENABLE_WAYLAND", "1")
-            .env("ELECTRON_OZONE_PLATFORM_HINT", "wayland")
-            .envs(self.buses.env())
-            // GTK's own settings come from the keyfile written at start.
-            .env("GSETTINGS_BACKEND", "keyfile")
+            .envs(app_env(&self.buses))
             .spawn()
             .map_err(|e| io::Error::new(e.kind(), format!("{program}: {e}")))?;
         self.children.push((name.to_owned(), child));
@@ -98,6 +121,70 @@ impl<'a> Session<'a> {
     /// Launch names of the running programs.
     pub fn launched(&self) -> impl Iterator<Item = &str> {
         self.children.iter().map(|(n, _)| n.as_str())
+    }
+
+    /// Run the storyboard's seed commands, in order, before any app starts.
+    pub fn seed(&mut self, story: &Story) -> io::Result<()> {
+        for (i, seed) in story.seeds.iter().enumerate() {
+            if seed.network {
+                return Err(io::Error::other(format!(
+                    "seed {}: network access is not supported yet",
+                    i + 1
+                )));
+            }
+            let mut child = self
+                .boundary
+                .command("bash")
+                .args(["-c", &seed.run])
+                .envs(app_env(&self.buses))
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()?;
+            let timeout = seed.timeout.unwrap_or(Duration::from_secs(60));
+            let start = Instant::now();
+            let status = loop {
+                if let Some(status) = child.try_wait()? {
+                    break status;
+                }
+                if start.elapsed() > timeout {
+                    let _ = child.kill();
+                    return Err(io::Error::other(format!(
+                        "seed {}: `{}` did not finish within {timeout:?}",
+                        i + 1,
+                        seed.run
+                    )));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            if !status.success() {
+                let mut stderr = String::new();
+                if let Some(mut e) = child.stderr.take() {
+                    let _ = std::io::Read::read_to_string(&mut e, &mut stderr);
+                }
+                return Err(io::Error::other(format!(
+                    "seed {}: `{}` failed ({status}){}",
+                    i + 1,
+                    seed.run,
+                    if stderr.trim().is_empty() {
+                        String::new()
+                    } else {
+                        format!(":\n{}", stderr.trim_end())
+                    }
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// The storyboard's folder as seen inside the session.
+    pub fn story_dir(&self) -> &Path {
+        self.boundary.story_dir()
+    }
+
+    /// The terminal, when the story has one.
+    pub fn terminal(&mut self) -> Option<&mut Terminal> {
+        self.terminal.as_mut().map(|(t, _)| t)
     }
 
     /// Start every app the storyboard launches.
@@ -153,11 +240,22 @@ impl<'a> Session<'a> {
         }
         self.check_children()?;
         self.frames += 1;
-        let frame = self.compositor.render(self.now())?;
+        let mut frame = self.compositor.render(self.now())?;
+        if let Some((terminal, pane)) = &self.terminal {
+            pane.draw(terminal, &mut frame, self.scale);
+        }
         if let Some(recording) = &mut self.recording {
-            recording.add(&frame, self.compositor.pointer_location());
+            let pointer = self
+                .pointer_shown
+                .then(|| self.compositor.pointer_location());
+            recording.add(&frame, pointer);
         }
         Ok(frame)
+    }
+
+    /// Draw the pointer in recordings from now on.
+    pub fn show_pointer(&mut self) {
+        self.pointer_shown = true;
     }
 
     /// Keep every frame from now on.
@@ -193,4 +291,22 @@ impl<'a> Session<'a> {
         }
         Ok(())
     }
+}
+
+/// Environment for programs in the session: the display, the buses, and
+/// the settings that make toolkits use them.
+fn app_env(buses: &Buses) -> Vec<(&str, &str)> {
+    let mut env = vec![
+        ("WAYLAND_DISPLAY", DISPLAY),
+        ("XDG_SESSION_TYPE", "wayland"),
+        ("GDK_BACKEND", "wayland"),
+        ("QT_QPA_PLATFORM", "wayland"),
+        ("SDL_VIDEODRIVER", "wayland"),
+        ("MOZ_ENABLE_WAYLAND", "1"),
+        ("ELECTRON_OZONE_PLATFORM_HINT", "wayland"),
+        // GTK's own settings come from the keyfile written at start.
+        ("GSETTINGS_BACKEND", "keyfile"),
+    ];
+    env.extend(buses.env());
+    env
 }

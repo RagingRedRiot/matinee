@@ -18,6 +18,8 @@ use wayland_client::{
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 
 const SCALE: u32 = 2;
+/// The size a window picks when the compositor leaves it the choice.
+const OWN_SIZE: (i32, i32) = (120, 90);
 const SIZE: (u32, u32) = (400, 300);
 const BLUE: u32 = 0xff3366cc;
 const ORANGE: u32 = 0xffee8833;
@@ -159,8 +161,11 @@ impl Dispatch<xdg_surface::XdgSurface, usize> for Client {
         if let xdg_surface::Event::Configure { serial } = event {
             xdg.ack_configure(serial);
             let probe = &mut client.surfaces[*index];
-            if probe.size.0 == 0 {
-                probe.size = PENDING.with(|p| p.get());
+            // Dialogs keep their own size; other windows take the size
+            // they are given, or pick one when given none.
+            if probe.spec.dialog.is_none() {
+                let (w, h) = PENDING.with(|p| p.get());
+                probe.size = if w > 0 && h > 0 { (w, h) } else { OWN_SIZE };
             }
             client.draw(*index, qh);
         }
@@ -183,7 +188,7 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for Client {
         _: &QueueHandle<Self>,
     ) {
         if let xdg_toplevel::Event::Configure { width, height, .. } = event {
-            PENDING.with(|p| p.set((width.max(1), height.max(1))));
+            PENDING.with(|p| p.set((width, height)));
         }
     }
 }
@@ -357,6 +362,13 @@ fn a_window_fills_the_output_and_renders() {
         }],
     );
     h.until("the window", mapped(&["Probe"]));
+    // It first draws at its own size, then is resized to fill the area.
+    h.until("the window at full size", |c| {
+        c.windows()
+            .iter()
+            .any(|w| w.rect.size == (SIZE.0 as i32, SIZE.1 as i32).into())
+    });
+    h.compositor.dispatch(Duration::from_millis(50)).unwrap();
     let window = &h.windows()[0];
     assert_eq!(window.rect.loc, (0, 0).into());
     assert_eq!(window.rect.size, (SIZE.0 as i32, SIZE.1 as i32).into());

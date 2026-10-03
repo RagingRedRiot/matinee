@@ -24,7 +24,37 @@ pub struct Story {
     pub launches: Vec<Launch>,
     pub camera: Camera,
     pub session: Session,
+    pub terminal: TerminalPane,
     pub scenes: Vec<Scene>,
+}
+
+/// matinee's terminal pane, drawn into the frame beside the app windows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TerminalPane {
+    pub position: PanePosition,
+    /// Height for a bottom pane, width for a right one, in points. `None`
+    /// picks a size from the screen.
+    pub size: Option<u32>,
+    /// Text size in points.
+    pub font_size: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PanePosition {
+    Bottom,
+    Right,
+}
+
+impl Story {
+    /// Whether the story shows a terminal: it runs commands, or launches
+    /// no app and so is a terminal demo.
+    pub fn has_terminal(&self) -> bool {
+        self.launches.is_empty()
+            || self
+                .steps()
+                .any(|s| matches!(s.action, Action::Run { .. } | Action::Playback { .. }))
+    }
 }
 
 /// What the isolated session may see beyond the project.
@@ -129,6 +159,7 @@ pub enum Action {
         exit: i32,
     },
     /// Display a command and play back canned output; nothing runs.
+    /// `output` is relative to the storyboard's folder.
     Playback {
         shown: String,
         output: PathBuf,
@@ -252,8 +283,17 @@ struct RawStory {
     launch: Option<OneOrMany<RawLaunch>>,
     camera: Option<RawCamera>,
     session: Option<RawSession>,
+    terminal: Option<RawTerminal>,
     #[serde(default)]
     scene: Vec<RawScene>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTerminal {
+    position: Option<PanePosition>,
+    size: Option<u32>,
+    font_size: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -485,6 +525,28 @@ impl RawStory {
         let session = Session {
             mounts: self.session.map(|s| s.mounts).unwrap_or_default(),
         };
+        let t = self.terminal.unwrap_or(RawTerminal {
+            position: None,
+            size: None,
+            font_size: None,
+        });
+        let terminal = TerminalPane {
+            position: t.position.unwrap_or(PanePosition::Bottom),
+            size: t.size,
+            font_size: t.font_size.unwrap_or(15.0),
+        };
+        if !(6.0..=72.0).contains(&terminal.font_size) {
+            return Err("terminal.font_size must be from 6 to 72".into());
+        }
+        let limit = match terminal.position {
+            PanePosition::Bottom => demo.size[1],
+            PanePosition::Right => demo.size[0],
+        };
+        if terminal.size.is_some_and(|n| n == 0 || n >= limit) {
+            return Err(format!(
+                "terminal.size must leave room for windows: less than {limit}"
+            ));
+        }
         if let Some(m) = session.mounts.iter().find(|m| m.trim().is_empty()) {
             return Err(format!("session.mounts: `{m}` is not a path"));
         }
@@ -496,6 +558,7 @@ impl RawStory {
             launches,
             camera,
             session,
+            terminal,
             scenes,
         })
     }
@@ -561,7 +624,10 @@ impl RawStep {
             only_with(key, set, &targeted)?;
         }
 
-        let targets_app = action.is_some_and(|a| targeted.contains(&a))
+        // A plain `wait_for` or `expect` may be text in the terminal pane.
+        let terminal_text =
+            matches!(action, Some("wait_for" | "expect")) && context.iter().all(|(_, set)| !set);
+        let targets_app = action.is_some_and(|a| targeted.contains(&a)) && !terminal_text
             || matches!(self.camera, Some(RawCameraMove::Focus(_)));
         if targets_app && launches.is_empty() {
             return Err("this step targets an app, but the storyboard launches none".into());
@@ -622,10 +688,7 @@ impl RawStep {
                 if !file.is_file() {
                     return Err(format!("output file {} does not exist", file.display()));
                 }
-                Action::Playback {
-                    shown,
-                    output: file,
-                }
+                Action::Playback { shown, output }
             }
             Some("wait_for") => Action::WaitFor(target(self.wait_for.take().unwrap(), &mut self)),
             Some("expect") => Action::Expect(target(self.expect.take().unwrap(), &mut self)),

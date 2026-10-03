@@ -1,3 +1,6 @@
+# The storyboard sketched in VISION.md, kept here so the format and the
+# docs cannot drift apart. It is checked, never run.
+
 [demo]
 output = "docs/assets/demo"          # demo-light.gif, demo-dark.gif
 size = [1200, 720]

@@ -23,7 +23,7 @@ fn error(steps: &str) -> String {
 
 #[test]
 fn vision_example_loads() {
-    let story = Story::load("examples/callboard/demo.toml".as_ref()).unwrap();
+    let story = Story::load("tests/fixtures/vision.toml".as_ref()).unwrap();
     assert_eq!(story.demo.themes, [Theme::Light, Theme::Dark]);
     assert_eq!(story.seeds.len(), 2);
     assert_eq!(story.launches[0].name, "callboard-gui");
@@ -79,7 +79,7 @@ fn playback_reads_a_file_beside_the_storyboard() {
         story.scenes[0].steps[0].action,
         Action::Playback {
             shown: "gh auth status".into(),
-            output: PathBuf::from("tests/story.rs"),
+            output: PathBuf::from("story.rs"),
         }
     );
     assert!(error(r#"{ terminal = "gh", output = "missing.txt" }"#).contains("does not exist"));
@@ -124,6 +124,20 @@ fn targets_need_a_launched_app() {
         PathBuf::new(),
     )
     .unwrap_err();
+    assert!(e.contains("launches none"), "{e}");
+}
+
+#[test]
+fn plain_expectations_may_check_terminal_text() {
+    let story = |step: &str| {
+        Story::parse(
+            &format!("[demo]\noutput = \"d\"\nsize = [1, 1]\n[[scene]]\nsteps = [{step}]\n"),
+            PathBuf::new(),
+        )
+    };
+    assert!(story(r#"{ expect = "done" }"#).is_ok());
+    assert!(story(r#"{ wait_for = "ready" }"#).is_ok());
+    let e = story(r#"{ expect = "OK", role = "button" }"#).unwrap_err();
     assert!(e.contains("launches none"), "{e}");
 }
 

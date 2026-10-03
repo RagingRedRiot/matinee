@@ -4,7 +4,7 @@
 
 use std::process::{Command, Output};
 
-const STORY: &str = "examples/callboard/demo.toml";
+const STORY: &str = "examples/calculator/demo.toml";
 
 fn shell(script: &str) -> Output {
     Command::new(env!("CARGO_BIN_EXE_matinee"))
@@ -175,7 +175,7 @@ fn bad_storyboard_is_reported() {
 fn project_root_holds_the_storyboard() {
     // This repository is the project, so its files are visible and the
     // session starts in the storyboard's folder within it.
-    assert_eq!(stdout("pwd"), "/project/examples/callboard");
+    assert_eq!(stdout("pwd"), "/project/examples/calculator");
     assert_eq!(stdout("test -f /project/Cargo.toml && echo yes"), "yes");
 }
 

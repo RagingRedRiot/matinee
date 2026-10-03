@@ -1,0 +1,475 @@
+//! matinee's terminal pane: a real pseudo-terminal, read by a terminal
+//! emulator and drawn into each frame with an embedded font, so it looks
+//! the same on every machine.
+//!
+//! One bash runs for the whole story, so `cd` and exported variables carry
+//! from one step to the next. It does not read the terminal: matinee sends
+//! it each command over a private pipe, and bash reports each exit status
+//! over another. The command itself runs with the terminal as its input and
+//! output, so programs behave as they would for a person, and its output is
+//! exactly what appears. matinee draws the prompt and types the command
+//! line, which is how a staged step can show one command while running
+//! another.
+
+use crate::{boundary::Boundary, compositor::Frame, story::Theme};
+use std::{
+    collections::HashMap,
+    io::{self, BufRead, Read, Write},
+    os::{
+        fd::{AsRawFd, FromRawFd, OwnedFd},
+        unix::process::CommandExt,
+    },
+    process::{Child, Stdio},
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, Receiver},
+    },
+};
+
+const REGULAR: &[u8] = include_bytes!("../assets/fonts/DejaVuSansMono.ttf");
+const BOLD: &[u8] = include_bytes!("../assets/fonts/DejaVuSansMono-Bold.ttf");
+
+/// The prompt matinee draws before each command: a bold cyan `$`.
+const PROMPT: &str = "\x1b[1;36m$\x1b[0m ";
+
+/// The loop bash runs: read a NUL-terminated command from fd 3, run it on
+/// the terminal, and write its status to fd 4. Ctrl+C stops the command,
+/// not the loop.
+const LOOP: &str = r#"trap : INT
+while IFS= read -r -d '' __matinee_cmd <&3; do
+  eval "$__matinee_cmd" </dev/tty 3<&- 4>&-
+  printf '%d\n' "$?" >&4
+done"#;
+
+pub struct Terminal {
+    screen: Arc<Mutex<vt100::Parser>>,
+    master: std::fs::File,
+    commands: std::fs::File,
+    statuses: Receiver<i32>,
+    child: Child,
+}
+
+impl Terminal {
+    /// Start a shell on a terminal of `rows` by `cols`, with `env` added
+    /// to the boundary's environment.
+    pub fn start(
+        boundary: &Boundary,
+        rows: u16,
+        cols: u16,
+        env: &[(&str, &str)],
+    ) -> io::Result<Terminal> {
+        let (master, slave) = open_pty(rows, cols)?;
+        let (command_read, command_write) = pipe()?;
+        let (status_read, status_write) = pipe()?;
+        let (command_fd, status_fd) = (command_read.as_raw_fd(), status_write.as_raw_fd());
+
+        let mut cmd = boundary.command("bash");
+        cmd.args(["--noprofile", "--norc", "-c", LOOP])
+            .envs(env.iter().copied())
+            .env("TERM", "xterm-256color")
+            .stdin(Stdio::from(slave.try_clone()?))
+            .stdout(Stdio::from(slave.try_clone()?))
+            .stderr(Stdio::from(slave));
+        unsafe {
+            cmd.pre_exec(move || {
+                // Its own session, with the terminal as the controlling
+                // terminal, so /dev/tty and Ctrl+C work.
+                if libc::setsid() < 0
+                    || libc::ioctl(0, libc::TIOCSCTTY, 0) < 0
+                    || libc::dup2(command_fd, 3) < 0
+                    || libc::dup2(status_fd, 4) < 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = cmd
+            .spawn()
+            .map_err(|e| io::Error::new(e.kind(), format!("bash: {e}")))?;
+        drop((command_read, status_write));
+
+        let screen = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
+        let sink = screen.clone();
+        let mut reader = std::fs::File::from(master.try_clone()?);
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            // Ends with an error once every writer has gone.
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                sink.lock().unwrap().process(&buf[..n]);
+            }
+        });
+        let (status_tx, statuses) = mpsc::channel();
+        let status_reader = io::BufReader::new(std::fs::File::from(status_read));
+        std::thread::spawn(move || {
+            for line in status_reader.lines() {
+                let Ok(line) = line else { break };
+                if let Ok(status) = line.trim().parse() {
+                    if status_tx.send(status).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+
+        let terminal = Terminal {
+            screen,
+            master: std::fs::File::from(master),
+            commands: std::fs::File::from(command_write),
+            statuses,
+            child,
+        };
+        terminal.show(PROMPT);
+        Ok(terminal)
+    }
+
+    /// Draw text into the pane as if the terminal had printed it.
+    pub fn show(&self, text: &str) {
+        self.screen.lock().unwrap().process(text.as_bytes());
+    }
+
+    /// Start a command. Its status arrives through [`Terminal::finished`].
+    pub fn run(&mut self, command: &str) -> io::Result<()> {
+        let mut bytes = command.as_bytes().to_vec();
+        bytes.push(0);
+        self.commands.write_all(&bytes)
+    }
+
+    /// The exit status of the last command, once it has finished.
+    pub fn finished(&mut self) -> io::Result<Option<i32>> {
+        match self.statuses.try_recv() {
+            Ok(status) => Ok(Some(status)),
+            Err(mpsc::TryRecvError::Empty) => match self.child.try_wait()? {
+                Some(status) => Err(io::Error::other(format!(
+                    "the terminal's shell exited ({status})"
+                ))),
+                None => Ok(None),
+            },
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err(io::Error::other("the terminal's shell stopped"))
+            }
+        }
+    }
+
+    /// After a command: start a fresh line if needed, then show the prompt.
+    pub fn prompt(&self) {
+        let column = self.screen.lock().unwrap().screen().cursor_position().1;
+        if column != 0 {
+            self.show("\r\n");
+        }
+        self.show(PROMPT);
+    }
+
+    /// Send keys to whatever is running in the terminal.
+    pub fn send(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.master.write_all(bytes)
+    }
+
+    /// Whether the terminal shows `text` anywhere on screen.
+    pub fn contains(&self, text: &str) -> bool {
+        self.screen
+            .lock()
+            .unwrap()
+            .screen()
+            .contents()
+            .contains(text)
+    }
+
+    /// Everything on screen, for diagnostics.
+    pub fn contents(&self) -> String {
+        self.screen.lock().unwrap().screen().contents()
+    }
+}
+
+impl Drop for Terminal {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn open_pty(rows: u16, cols: u16) -> io::Result<(OwnedFd, OwnedFd)> {
+    let (mut master, mut slave) = (-1, -1);
+    let size = libc::winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let ret = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            &size,
+        )
+    };
+    if ret < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+    for fd in [&master, &slave] {
+        unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
+    }
+    Ok((master, slave))
+}
+
+fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
+    let mut fds = [0; 2];
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
+}
+
+/// The bytes a terminal receives for a key chord, such as `enter` or
+/// `ctrl+c`.
+pub fn chord_bytes(chord: &str) -> Result<Vec<u8>, String> {
+    let lower = chord.to_ascii_lowercase();
+    let (mods, key) = match lower.rsplit_once('+') {
+        Some((mods, key)) if !key.is_empty() => (mods, key),
+        _ => ("", lower.as_str()),
+    };
+    if mods == "ctrl" && key.len() == 1 {
+        let c = key.as_bytes()[0];
+        if c.is_ascii_lowercase() {
+            return Ok(vec![c - b'a' + 1]);
+        }
+    }
+    if !mods.is_empty() {
+        return Err(format!("`{chord}` cannot be sent to the terminal"));
+    }
+    Ok(match key {
+        "enter" | "return" => b"\r".to_vec(),
+        "tab" => b"\t".to_vec(),
+        "escape" | "esc" => b"\x1b".to_vec(),
+        "backspace" => b"\x7f".to_vec(),
+        "space" => b" ".to_vec(),
+        "up" => b"\x1b[A".to_vec(),
+        "down" => b"\x1b[B".to_vec(),
+        "right" => b"\x1b[C".to_vec(),
+        "left" => b"\x1b[D".to_vec(),
+        "home" => b"\x1b[H".to_vec(),
+        "end" => b"\x1b[F".to_vec(),
+        "delete" | "del" => b"\x1b[3~".to_vec(),
+        "pageup" => b"\x1b[5~".to_vec(),
+        "pagedown" => b"\x1b[6~".to_vec(),
+        k if k.chars().count() == 1 => k.as_bytes().to_vec(),
+        _ => return Err(format!("`{chord}` is not a key name")),
+    })
+}
+
+/// A rasterized glyph's character, weight (bold or not), and scale.
+type GlyphKey = (char, bool, u32);
+
+/// How the pane looks, and where it sits on the output.
+pub struct Pane {
+    regular: fontdue::Font,
+    bold: fontdue::Font,
+    /// Text size in points.
+    font_size: f32,
+    background: u32,
+    foreground: u32,
+    palette: [u32; 16],
+    /// x, y, width, height in points.
+    pub rect: (f32, f32, f32, f32),
+    padding: f32,
+    glyphs: Mutex<HashMap<GlyphKey, (fontdue::Metrics, Vec<u8>)>>,
+}
+
+impl Pane {
+    pub fn new(rect: (f32, f32, f32, f32), font_size: f32, theme: Theme) -> Pane {
+        let load = |data| {
+            fontdue::Font::from_bytes(data, fontdue::FontSettings::default())
+                .expect("the embedded font is valid")
+        };
+        let (background, foreground, palette) = match theme {
+            Theme::Dark => (
+                0x0F172A,
+                0xE2E8F0,
+                [
+                    0x1E293B, 0xF87171, 0x4ADE80, 0xFACC15, 0x60A5FA, 0xC084FC, 0x22D3EE, 0xCBD5E1,
+                    0x475569, 0xFCA5A5, 0x86EFAC, 0xFDE047, 0x93C5FD, 0xD8B4FE, 0x67E8F9, 0xF8FAFC,
+                ],
+            ),
+            Theme::Light => (
+                0xF8FAFC,
+                0x1E293B,
+                [
+                    0x334155, 0xDC2626, 0x16A34A, 0xA16207, 0x2563EB, 0x9333EA, 0x0891B2, 0x64748B,
+                    0x475569, 0xEF4444, 0x22C55E, 0xCA8A04, 0x3B82F6, 0xA855F7, 0x06B6D4, 0x0F172A,
+                ],
+            ),
+        };
+        Pane {
+            regular: load(REGULAR),
+            bold: load(BOLD),
+            font_size,
+            background,
+            foreground,
+            palette,
+            rect,
+            padding: (font_size * 0.8).round(),
+            glyphs: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Cell width and line height in points.
+    fn cell(&self) -> (f32, f32) {
+        let width = self.regular.metrics('M', self.font_size).advance_width;
+        let line = self
+            .regular
+            .horizontal_line_metrics(self.font_size)
+            .expect("the embedded font has line metrics");
+        (width, (line.new_line_size * 1.15).ceil())
+    }
+
+    /// Rows and columns that fit in the pane.
+    pub fn grid(&self) -> (u16, u16) {
+        let (cw, lh) = self.cell();
+        let (_, _, w, h) = self.rect;
+        (
+            (((h - 2.0 * self.padding) / lh).floor() as u16).max(1),
+            (((w - 2.0 * self.padding) / cw).floor() as u16).max(1),
+        )
+    }
+
+    fn color(&self, c: vt100::Color, default: u32) -> u32 {
+        match c {
+            vt100::Color::Default => default,
+            vt100::Color::Idx(i) if i < 16 => self.palette[i as usize],
+            vt100::Color::Idx(i) if i < 232 => {
+                let i = i - 16;
+                let level = |v: u8| if v == 0 { 0 } else { 55 + v as u32 * 40 };
+                level(i / 36) << 16 | level(i / 6 % 6) << 8 | level(i % 6)
+            }
+            vt100::Color::Idx(i) => {
+                let g = 8 + (i as u32 - 232) * 10;
+                g << 16 | g << 8 | g
+            }
+            vt100::Color::Rgb(r, g, b) => (r as u32) << 16 | (g as u32) << 8 | b as u32,
+        }
+    }
+
+    /// Draw the terminal's screen into `frame`, which is `scale` device
+    /// pixels per point.
+    pub fn draw(&self, terminal: &Terminal, frame: &mut Frame, scale: u32) {
+        let s = scale as f32;
+        let px = |v: f32| (v * s).round() as i64;
+        let (x0, y0, w, h) = self.rect;
+        fill(
+            frame,
+            px(x0),
+            px(y0),
+            px(x0 + w),
+            px(y0 + h),
+            self.background,
+        );
+
+        let (cw, lh) = self.cell();
+        let size = self.font_size * s;
+        let ascent = self
+            .regular
+            .horizontal_line_metrics(size)
+            .expect("the embedded font has line metrics")
+            .ascent;
+        // The glyph's own line height, centered in the taller row.
+        let lead = (lh - lh / 1.15) / 2.0;
+        let parser = terminal.screen.lock().unwrap();
+        let screen = parser.screen();
+        let (rows, cols) = screen.size();
+        let mut glyphs = self.glyphs.lock().unwrap();
+        for row in 0..rows {
+            for col in 0..cols {
+                let Some(cell) = screen.cell(row, col) else {
+                    continue;
+                };
+                let cx = x0 + self.padding + col as f32 * cw;
+                let cy = y0 + self.padding + row as f32 * lh;
+                let mut fg = self.color(cell.fgcolor(), self.foreground);
+                let mut bg = self.color(cell.bgcolor(), self.background);
+                if cell.bold() {
+                    if let vt100::Color::Idx(i @ 0..8) = cell.fgcolor() {
+                        fg = self.palette[i as usize + 8];
+                    }
+                }
+                if cell.inverse() {
+                    std::mem::swap(&mut fg, &mut bg);
+                }
+                if !screen.hide_cursor() && screen.cursor_position() == (row, col) {
+                    bg = self.foreground;
+                    fg = self.background;
+                }
+                if bg != self.background {
+                    fill(frame, px(cx), px(cy), px(cx + cw), px(cy + lh), bg);
+                }
+                let Some(c) = cell.contents().chars().next() else {
+                    continue;
+                };
+                if c == ' ' {
+                    continue;
+                }
+                let bold = cell.bold();
+                let (m, bitmap) = glyphs.entry((c, bold, scale)).or_insert_with(|| {
+                    let font = if bold { &self.bold } else { &self.regular };
+                    font.rasterize(c, size)
+                });
+                let gx = px(cx) + m.xmin as i64;
+                let gy =
+                    ((cy + lead) * s + ascent).round() as i64 - m.height as i64 - m.ymin as i64;
+                blend(frame, gx, gy, m.width, m.height, bitmap, fg);
+            }
+        }
+    }
+}
+
+fn fill(frame: &mut Frame, x0: i64, y0: i64, x1: i64, y1: i64, rgb: u32) {
+    let (w, h) = (frame.width as i64, frame.height as i64);
+    for y in y0.max(0)..y1.min(h) {
+        let row = y as usize * frame.width;
+        frame.pixels[row + x0.max(0) as usize..row + x1.min(w).max(0) as usize]
+            .fill(0xff000000 | rgb);
+    }
+}
+
+fn blend(frame: &mut Frame, x0: i64, y0: i64, w: usize, h: usize, alpha: &[u8], rgb: u32) {
+    for gy in 0..h {
+        let y = y0 + gy as i64;
+        if y < 0 || y >= frame.height as i64 {
+            continue;
+        }
+        for gx in 0..w {
+            let x = x0 + gx as i64;
+            let a = alpha[gy * w + gx] as u32;
+            if a == 0 || x < 0 || x >= frame.width as i64 {
+                continue;
+            }
+            let at = y as usize * frame.width + x as usize;
+            let d = frame.pixels[at];
+            let mix = |shift: u32| {
+                let c = (rgb >> shift) & 0xff;
+                let b = (d >> shift) & 0xff;
+                ((c * a + b * (255 - a)) / 255) << shift
+            };
+            frame.pixels[at] = 0xff000000 | mix(16) | mix(8) | mix(0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chords_for_the_terminal() {
+        assert_eq!(chord_bytes("enter").unwrap(), b"\r");
+        assert_eq!(chord_bytes("ctrl+c").unwrap(), [3]);
+        assert_eq!(chord_bytes("up").unwrap(), b"\x1b[A");
+        assert_eq!(chord_bytes("q").unwrap(), b"q");
+        assert!(chord_bytes("ctrl+shift+t").is_err());
+    }
+}

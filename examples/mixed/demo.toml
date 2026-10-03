@@ -1,0 +1,24 @@
+# A terminal pane below an app window: a command checks the sum the
+# calculator is about to show.
+
+[demo]
+output = "mixed"
+size = [800, 760]
+
+[terminal]
+size = 220
+font_size = 16
+
+[launch]
+app = "gnome-calculator"
+wait_for = "="
+
+[[scene]]
+steps = [
+  { run = "echo $((7 + 8))", hold = "500ms" },
+  { click = "7" },
+  { click = "+" },
+  { click = "8" },
+  { click = "=", hold = "1s" },
+  { expect = "15", in = "gnome-calculator" },
+]

@@ -209,6 +209,13 @@ impl Compositor {
         })
     }
 
+    /// The part of the output windows are laid out in: x, y, width,
+    /// height in logical points.
+    pub fn window_area(&self) -> (i32, i32, i32, i32) {
+        let a = self.state.area;
+        (a.loc.x, a.loc.y, a.size.w, a.size.h)
+    }
+
     /// Lay out toplevel windows in this part of the output, in logical
     /// points, such as everything above a terminal pane.
     pub fn set_window_area(&mut self, x: i32, y: i32, w: i32, h: i32) {
@@ -466,6 +473,9 @@ struct State {
 /// Marks a dialog that has been centered, so it is not moved again.
 struct Centered;
 
+/// Marks a toplevel that has been given the window area's size.
+struct Sized;
+
 impl State {
     fn pointer(&self) -> PointerHandle<State> {
         self.seat.get_pointer().expect("the seat has a pointer")
@@ -574,6 +584,15 @@ impl CompositorHandler for State {
                         toplevel.send_configure();
                     } else if toplevel.parent().is_some() {
                         self.place(&window);
+                    } else if window.geometry().size.w > 0
+                        && window.user_data().get::<Sized>().is_none()
+                    {
+                        // Size it to the area only once it has drawn at its
+                        // own size. Some layouts (GNOME Calculator's entry)
+                        // measure once against the first size they get and
+                        // need a real resize to measure again.
+                        window.user_data().insert_if_missing(|| Sized);
+                        self.place(&window);
                     }
                 }
             }
@@ -615,12 +634,9 @@ impl XdgShellHandler for State {
             }
         });
         let window = Window::new_wayland_window(surface);
-        if window.toplevel().is_some_and(|t| t.parent().is_some()) {
-            // Mapped off-area until its size is known, then centered.
-            self.space.map_element(window.clone(), self.area.loc, true);
-        } else {
-            self.place(&window);
-        }
+        // Every toplevel first draws at a size of its own choosing; see
+        // `commit` for why the area's size comes only after that.
+        self.space.map_element(window.clone(), self.area.loc, true);
         self.focus(&window, SERIAL_COUNTER.next_serial());
     }
 

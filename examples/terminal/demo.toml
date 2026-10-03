@@ -1,0 +1,23 @@
+# A terminal-only demo: a real command, a staged one that shows `gh` while
+# reading a fixture, canned output, and a command expected to fail.
+
+[demo]
+output = "terminal"
+size = [800, 400]
+
+[terminal]
+font_size = 18
+
+[[seed]]
+run = "mkdir -p ~/notes && printf 'buy milk\\nrecord the demo\\n' > ~/notes/todo.txt"
+
+[[scene]]
+steps = [
+  { run = "cat ~/notes/todo.txt", hold = "1s" },
+  { expect = "record the demo" },
+  # shown in the terminal / actually run
+  { terminal = "gh pr list --author @me", run = "cat fixtures/prs.txt", hold = "1.5s" },
+  { expect = "Fix flaky upload retry" },
+  { terminal = "gh auth status", output = "fixtures/auth.txt", hold = "1.5s" },
+  { run = "false", exit = 1, hold = "1s" },
+]

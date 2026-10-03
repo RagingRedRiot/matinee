@@ -34,8 +34,9 @@ const ARROW: [&str; 19] = [
     "       XX",
 ];
 
-/// One tick of a recording: an index into its images, and the pointer.
-type Tick = (usize, (i32, i32));
+/// One tick of a recording: an index into its images, and the pointer
+/// when it is shown.
+type Tick = (usize, Option<(i32, i32)>);
 
 pub struct Recording {
     scale: usize,
@@ -43,7 +44,7 @@ pub struct Recording {
     pub height: usize,
     /// Distinct app images, at output size, as 0xRRGGBB.
     images: Vec<Vec<u32>>,
-    /// For each tick, the image shown and where the pointer was.
+    /// For each tick, the image shown and where the pointer was, if shown.
     ticks: Vec<Tick>,
 }
 
@@ -69,13 +70,13 @@ impl Recording {
     }
 
     /// Add one tick: the rendered output, and the pointer in logical
-    /// points.
-    pub fn add(&mut self, frame: &Frame, pointer: (f64, f64)) {
+    /// points when it is shown.
+    pub fn add(&mut self, frame: &Frame, pointer: Option<(f64, f64)>) {
         let image = downscale(frame, self.scale, self.width, self.height);
         if self.images.last() != Some(&image) {
             self.images.push(image);
         }
-        let pointer = (pointer.0.round() as i32, pointer.1.round() as i32);
+        let pointer = pointer.map(|(x, y)| (x.round() as i32, y.round() as i32));
         self.ticks.push((self.images.len() - 1, pointer));
     }
 
@@ -187,8 +188,11 @@ impl Recording {
     }
 
     /// An app image with the pointer drawn on it.
-    fn compose(&self, image: usize, (px, py): (i32, i32)) -> Vec<u32> {
+    fn compose(&self, image: usize, pointer: Option<(i32, i32)>) -> Vec<u32> {
         let mut pixels = self.images[image].clone();
+        let Some((px, py)) = pointer else {
+            return pixels;
+        };
         for (dy, row) in ARROW.iter().enumerate() {
             for (dx, c) in row.chars().enumerate() {
                 let color = match c {
@@ -294,10 +298,10 @@ mod tests {
         // 15 ticks of one image, then 15 of another: one second at 15 fps
         // is 100 centiseconds each.
         for _ in 0..15 {
-            rec.add(&frame(20, 20, 0xff102030), (-50.0, -50.0));
+            rec.add(&frame(20, 20, 0xff102030), None);
         }
         for _ in 0..15 {
-            rec.add(&frame(20, 20, 0xffa0b0c0), (-50.0, -50.0));
+            rec.add(&frame(20, 20, 0xffa0b0c0), None);
         }
         let written = rec.write_gif(&path, 15).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
@@ -328,9 +332,9 @@ mod tests {
         // A second each: the pointer moves but stays off screen, so the
         // first two seconds look the same; then the image changes.
         for (color, pointer) in [
-            (0xff102030, (-50.0, -50.0)),
-            (0xff102030, (-60.0, -60.0)),
-            (0xffa0b0c0, (-60.0, -60.0)),
+            (0xff102030, Some((-50.0, -50.0))),
+            (0xff102030, Some((-60.0, -60.0))),
+            (0xffa0b0c0, Some((-60.0, -60.0))),
         ] {
             for _ in 0..15 {
                 rec.add(&frame(20, 20, color), pointer);

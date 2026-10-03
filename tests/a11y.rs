@@ -95,7 +95,7 @@ fn run_clicks_and_types_through_the_calculator_story() {
         "{stdout}{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(stdout.contains("all 8 steps passed"), "{stdout}");
+    assert!(stdout.contains("all 10 steps passed"), "{stdout}");
 }
 
 #[test]
@@ -226,4 +226,43 @@ fn the_calculator_lays_out_its_entry_at_full_height() {
         .count();
     std::fs::remove_dir_all(&dir).unwrap();
     assert!(white >= 100, "the entry is {white} device pixels tall");
+}
+
+#[test]
+#[ignore = "needs gnome-calculator"]
+fn expect_reads_what_a_text_field_contains() {
+    let dir = std::env::temp_dir().join(format!("matinee-field-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let story = dir.join("demo.toml");
+    std::fs::write(
+        &story,
+        r#"
+[demo]
+output = "x"
+size = [800, 600]
+[launch]
+app = "gnome-calculator"
+wait_for = "="
+[[scene]]
+steps = [
+  { click = "7" }, { click = "+" }, { click = "8" },
+  { expect = "7+8" },
+  { expect = "7+9", timeout = "1s" },
+]
+"#,
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_matinee"))
+        .arg("run")
+        .arg(&story)
+        .output()
+        .unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // The right contents pass; the wrong ones fail, naming what is there.
+    assert!(
+        stderr.contains("scene 1, step 5: nothing showing matches \"7+9\""),
+        "{stderr}"
+    );
+    assert!(stderr.contains("text box \"7+8\""), "{stderr}");
 }

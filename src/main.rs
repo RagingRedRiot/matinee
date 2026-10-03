@@ -152,6 +152,7 @@ fn snapshot(path: &str, out: &str, command: &[String]) -> ExitCode {
         let result = Boundary::for_story(&story, &work).and_then(|boundary| {
             boundary.run(|| {
                 let shot = Session::start(&boundary, &story, theme).and_then(|mut session| {
+                    session.seed(&story)?;
                     match command.split_first() {
                         Some((program, args)) => session.spawn(program, program, args)?,
                         None => session.launch(&story)?,
@@ -231,6 +232,7 @@ fn probe(path: &str, all: bool, command: &[String]) -> ExitCode {
         boundary.run(|| {
             let listed =
                 Session::start(&boundary, &story, story.demo.themes[0]).and_then(|mut session| {
+                    session.seed(&story)?;
                     match command.split_first() {
                         Some((program, args)) => session.spawn(program, program, args)?,
                         None => session.launch(&story)?,
@@ -280,15 +282,20 @@ fn print_tree(session: &Session, all: bool) -> std::io::Result<()> {
     for app in apps {
         println!("\napp \"{}\" (pid {})", app.name, app.pid);
         for node in a11y.nodes(&app, all) {
-            if node.depth > 0 && node.name.is_empty() && !all {
+            if node.depth > 0 && node.name.is_empty() && node.text.is_none() && !all {
                 continue;
             }
             let at = node
                 .extents
                 .map(|(x, y, w, h)| format!(" at {x},{y} {w}x{h}"))
                 .unwrap_or_default();
+            let text = node
+                .text
+                .as_ref()
+                .map(|t| format!(" containing {t:?}"))
+                .unwrap_or_default();
             println!(
-                "{}{} \"{}\"{at}{}{}",
+                "{}{} \"{}\"{text}{at}{}{}",
                 "  ".repeat(node.depth + 1),
                 node.role,
                 node.name,

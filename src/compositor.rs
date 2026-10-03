@@ -13,8 +13,14 @@
 
 use smithay::{
     backend::renderer::{
-        Bind, damage::OutputDamageTracker, element::surface::WaylandSurfaceRenderElement,
-        pixman::PixmanRenderer, utils::on_commit_buffer_handler,
+        Bind,
+        damage::OutputDamageTracker,
+        element::{
+            Kind,
+            surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
+        },
+        pixman::PixmanRenderer,
+        utils::on_commit_buffer_handler,
     },
     delegate_compositor, delegate_data_device, delegate_output, delegate_primary_selection,
     delegate_seat, delegate_shm, delegate_viewporter, delegate_xdg_decoration, delegate_xdg_shell,
@@ -37,7 +43,10 @@ use smithay::{
         wayland_server::{
             Client, Display, DisplayHandle, ListeningSocket, Resource,
             backend::{ClientData, ClientId, DisconnectReason},
-            protocol::{wl_buffer::WlBuffer, wl_seat::WlSeat, wl_surface::WlSurface},
+            protocol::{
+                wl_buffer::WlBuffer, wl_data_source::WlDataSource, wl_seat::WlSeat,
+                wl_surface::WlSurface,
+            },
         },
     },
     utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Serial, Size, Transform},
@@ -184,6 +193,7 @@ impl Compositor {
             space,
             popups: PopupManager::default(),
             area: Rectangle::from_size((size.0 as i32, size.1 as i32).into()),
+            dnd_icon: None,
             output,
             dh,
         };
@@ -271,6 +281,26 @@ impl Compositor {
                 .renderer
                 .bind(&mut self.target)
                 .map_err(io::Error::other)?;
+            // An app's drag icon follows the pointer, above every window.
+            let icon: Vec<WaylandSurfaceRenderElement<PixmanRenderer>> = match &state.dnd_icon {
+                Some(icon) if icon.is_alive() => {
+                    let scale = state.output.current_scale().fractional_scale();
+                    let at = state
+                        .pointer()
+                        .current_location()
+                        .to_physical(scale)
+                        .to_i32_round();
+                    render_elements_from_surface_tree(
+                        &mut self.renderer,
+                        icon,
+                        at,
+                        scale,
+                        1.0,
+                        Kind::Unspecified,
+                    )
+                }
+                _ => vec![],
+            };
             smithay::desktop::space::render_output::<
                 _,
                 WaylandSurfaceRenderElement<PixmanRenderer>,
@@ -283,7 +313,7 @@ impl Compositor {
                 1.0,
                 0,
                 [&state.space],
-                &[],
+                &icon,
                 &mut self.damage,
                 BACKGROUND,
             )
@@ -301,6 +331,15 @@ impl Compositor {
             window.send_frame(&state.output, time, Some(Duration::ZERO), |_, _| {
                 Some(state.output.clone())
             });
+        }
+        if let Some(icon) = &state.dnd_icon {
+            smithay::desktop::utils::send_frames_surface_tree(
+                icon,
+                &state.output,
+                time,
+                Some(Duration::ZERO),
+                |_, _| Some(state.output.clone()),
+            );
         }
         self.display.flush_clients()?;
         Ok(Frame {
@@ -466,6 +505,8 @@ struct State {
     popups: PopupManager,
     /// Where toplevel windows go, in logical points.
     area: Rectangle<i32, Logical>,
+    /// The icon an app shows under the pointer while it drags.
+    dnd_icon: Option<WlSurface>,
     output: Output,
     dh: DisplayHandle,
 }
@@ -749,7 +790,20 @@ impl DataDeviceHandler for State {
     }
 }
 
-impl ClientDndGrabHandler for State {}
+impl ClientDndGrabHandler for State {
+    fn started(
+        &mut self,
+        _source: Option<WlDataSource>,
+        icon: Option<WlSurface>,
+        _seat: Seat<Self>,
+    ) {
+        self.dnd_icon = icon;
+    }
+
+    fn dropped(&mut self, _target: Option<WlSurface>, _validated: bool, _seat: Seat<Self>) {
+        self.dnd_icon = None;
+    }
+}
 impl ServerDndGrabHandler for State {}
 
 impl PrimarySelectionHandler for State {

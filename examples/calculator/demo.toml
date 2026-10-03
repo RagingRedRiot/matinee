@@ -14,14 +14,16 @@ steps = [
   { click = "7" },
   { click = "+" },
   { click = "8" },
+  { expect = "7+8" },
   { click = "=", hold = "1s" },
-  { expect = "15" },
+  { expect = "15", role = "text box" },
 ]
 
 [[scene]]
 caption = "Or type"
 steps = [
   { type = "6*7" },
+  { expect = "6×7" },
   { key = "enter", hold = "1s" },
-  { expect = "42" },
+  { expect = "42", role = "text box" },
 ]

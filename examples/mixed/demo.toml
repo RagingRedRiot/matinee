@@ -20,5 +20,5 @@ steps = [
   { click = "+" },
   { click = "8" },
   { click = "=", hold = "1s" },
-  { expect = "15", in = "gnome-calculator" },
+  { expect = "15", role = "text box", in = "gnome-calculator" },
 ]

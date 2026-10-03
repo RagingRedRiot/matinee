@@ -11,6 +11,19 @@ use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 
 const ACCESSIBLE: &str = "org.a11y.atspi.Accessible";
 const COMPONENT: &str = "org.a11y.atspi.Component";
+const TEXT: &str = "org.a11y.atspi.Text";
+const VALUE: &str = "org.a11y.atspi.Value";
+/// Roles whose contents are read: fields a person types into or reads
+/// from. Password fields are never read.
+const TEXT_ROLES: &[&str] = &[
+    "text box",
+    "text",
+    "entry",
+    "editbar",
+    "terminal",
+    "paragraph",
+    "document text",
+];
 const REGISTRY: &str = "org.a11y.atspi.Registry";
 const ROOT: &str = "/org/a11y/atspi/accessible/root";
 const COORD_WINDOW: u32 = 1;
@@ -48,6 +61,10 @@ pub struct Node {
     pub extents: Option<(i32, i32, i32, i32)>,
     pub showing: bool,
     pub focused: bool,
+    /// The contents of a text field, for the roles in `TEXT_ROLES`.
+    pub text: Option<String>,
+    /// A slider's current, minimum, and maximum value.
+    pub value: Option<(f64, f64, f64)>,
 }
 
 impl A11y {
@@ -155,10 +172,40 @@ impl A11y {
                     stack.push((child, depth + 1, window.clone(), Some(index)));
                 }
             }
+            let role: String = self
+                .call(bus, p, ACCESSIBLE, "GetRoleName", &())
+                .unwrap_or_default();
+            let text = TEXT_ROLES
+                .contains(&role.as_str())
+                .then(|| {
+                    self.call::<_, String>(bus, p, TEXT, "GetText", &(0i32, -1i32))
+                        .ok()
+                })
+                .flatten();
+            let value = (role == "slider")
+                .then(|| {
+                    let get = |name: &str| {
+                        self.call::<_, OwnedValue>(
+                            bus,
+                            p,
+                            "org.freedesktop.DBus.Properties",
+                            "Get",
+                            &(VALUE, name),
+                        )
+                        .ok()
+                        .and_then(|v| f64::try_from(v).ok())
+                    };
+                    Some((
+                        get("CurrentValue")?,
+                        get("MinimumValue")?,
+                        get("MaximumValue")?,
+                    ))
+                })
+                .flatten();
             out.push(Node {
-                role: self
-                    .call(bus, p, ACCESSIBLE, "GetRoleName", &())
-                    .unwrap_or_default(),
+                role,
+                text,
+                value,
                 extents: self
                     .call::<_, (i32, i32, i32, i32)>(
                         bus,

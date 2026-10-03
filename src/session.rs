@@ -98,7 +98,13 @@ impl<'a> Session<'a> {
 
     /// Start a program that connects to the session's display, known to
     /// steps as `name`.
+    /// A leading `~/` in `program` means the session's home folder.
     pub fn spawn(&mut self, name: &str, program: &str, args: &[String]) -> io::Result<()> {
+        let program = match program.strip_prefix("~/") {
+            Some(rest) => format!("{HOME}/{rest}"),
+            None => program.to_owned(),
+        };
+        let program = program.as_str();
         let child = self
             .boundary
             .command(program)

@@ -1,0 +1,21 @@
+# Drag steps against a small GTK 4 window, compiled in the session.
+
+[demo]
+output = "drag"
+size = [800, 500]
+themes = ["light"]
+
+[[seed]]
+run = "cc drag.c -o ~/drag -lm $(pkg-config --cflags --libs gtk4)"
+
+[launch]
+app = "~/drag"
+wait_for = "Drop here"
+
+[[scene]]
+steps = [
+  { drag = "Drag me", to = "Drop here" },
+  { expect = "dropped: token" },
+  { drag_slider = "Volume", to = 0.7 },
+  { expect = "volume: 70" },
+]

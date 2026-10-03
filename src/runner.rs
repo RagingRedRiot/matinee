@@ -8,8 +8,10 @@
 //! diagnostic listing what is there instead. A target outside its window's
 //! visible area is refused rather than clicked where it is not.
 //!
-//! `wait_for` and `expect` with no context besides the name also accept
-//! that text showing in the terminal pane.
+//! `wait_for` and `expect` also accept a text field whose contents are
+//! exactly the expected text, and, with no context besides the name, that
+//! text showing in the terminal pane. Steps that act, such as clicks,
+//! match names only.
 //!
 //! A `run` step types its command line into the terminal pane, runs the
 //! command, and fails unless it exits with the expected status. A staged
@@ -38,6 +40,10 @@ const EXPECT_TIMEOUT: Duration = Duration::from_secs(3);
 const TRAVEL: Duration = Duration::from_millis(500);
 /// How long a click holds the button down.
 const CLICK: Duration = Duration::from_millis(80);
+/// How long a drag takes from press to drop.
+const DRAG: Duration = Duration::from_millis(900);
+/// The pause on the drop target before letting go, so the app sees it.
+const DROP_HOVER: Duration = Duration::from_millis(150);
 /// The time between typed characters.
 const PER_KEY: Duration = Duration::from_millis(70);
 /// How long an app may take to show its first window.
@@ -75,6 +81,10 @@ impl From<io::Error> for Failure {
 struct Found {
     /// The middle of the target, in logical points on the output.
     point: (f64, f64),
+    /// Its rectangle on the output: x, y, width, height.
+    rect: (f64, f64, f64, f64),
+    /// A slider's current, minimum, and maximum value.
+    value: Option<(f64, f64, f64)>,
 }
 
 pub struct Runner<'r, 'b> {
@@ -161,11 +171,11 @@ impl<'r, 'b> Runner<'r, 'b> {
             }
             Action::Hover(target) => {
                 let found = self.wait_until(target, step.timeout.unwrap_or(FIND_TIMEOUT), false)?;
-                self.move_to(found.point).map_err(io)?;
+                self.move_to(found.point, TRAVEL).map_err(io)?;
             }
             Action::Click(target) => {
                 let found = self.wait_until(target, step.timeout.unwrap_or(FIND_TIMEOUT), false)?;
-                self.move_to(found.point).map_err(io)?;
+                self.move_to(found.point, TRAVEL).map_err(io)?;
                 self.click().map_err(io)?;
             }
             Action::Type(text) => {
@@ -225,8 +235,34 @@ impl<'r, 'b> Runner<'r, 'b> {
                 terminal.prompt();
                 self.session.tick().map_err(io)?;
             }
-            Action::Drag { .. } | Action::DragSlider { .. } => {
-                return Err("drag steps are not supported yet".into());
+            Action::Drag { from, to } => {
+                let timeout = step.timeout.unwrap_or(FIND_TIMEOUT);
+                let source = self.wait_until(from, timeout, false)?;
+                self.move_to(source.point, TRAVEL).map_err(io)?;
+                let target = self.wait_until(to, timeout, false)?;
+                self.drag(target.point).map_err(io)?;
+            }
+            Action::DragSlider { target, to } => {
+                let found = self.wait_until(target, step.timeout.unwrap_or(FIND_TIMEOUT), false)?;
+                let (current, min, max) = found.value.ok_or_else(|| {
+                    format!("\"{}\" is not a slider that reports its value", target.name)
+                })?;
+                if max <= min {
+                    return Err(format!("\"{}\" has no range to drag along", target.name));
+                }
+                // The thumb sits at the current value's fraction of the
+                // slider's length; the drag ends at the requested one.
+                let (x, y, w, h) = found.rect;
+                let at = |fraction: f64| {
+                    if w >= h {
+                        (x + w * fraction, y + h / 2.0)
+                    } else {
+                        (x + w / 2.0, y + h * (1.0 - fraction))
+                    }
+                };
+                self.move_to(at((current - min) / (max - min)), TRAVEL)
+                    .map_err(io)?;
+                self.drag(at(*to)).map_err(io)?;
             }
         }
         if let Some(hold) = step.hold {
@@ -268,13 +304,13 @@ impl<'r, 'b> Runner<'r, 'b> {
         Ok(())
     }
 
-    /// Ease the pointer to `point` over [`TRAVEL`].
-    fn move_to(&mut self, point: (f64, f64)) -> io::Result<()> {
+    /// Ease the pointer to `point` over `duration`.
+    fn move_to(&mut self, point: (f64, f64), duration: Duration) -> io::Result<()> {
         let from = self.pointer;
         self.session.show_pointer();
         let start = self.session.now();
         loop {
-            let t = ((self.session.now() - start).as_secs_f64() / TRAVEL.as_secs_f64()).min(1.0);
+            let t = ((self.session.now() - start).as_secs_f64() / duration.as_secs_f64()).min(1.0);
             // Smoothstep: slow at both ends, like a hand.
             let e = t * t * (3.0 - 2.0 * t);
             let at = (
@@ -289,6 +325,23 @@ impl<'r, 'b> Runner<'r, 'b> {
             }
             self.session.tick()?;
         }
+    }
+
+    /// Press where the pointer is, carry it to `point`, and let go there.
+    fn drag(&mut self, point: (f64, f64)) -> io::Result<()> {
+        let now = self.session.now();
+        self.session
+            .compositor
+            .pointer_button(BUTTON_LEFT, true, now);
+        self.session.run_for(CLICK)?;
+        self.move_to(point, DRAG)?;
+        self.session.run_for(DROP_HOVER)?;
+        let now = self.session.now();
+        self.session
+            .compositor
+            .pointer_button(BUTTON_LEFT, false, now);
+        self.session.tick()?;
+        Ok(())
     }
 
     fn click(&mut self) -> io::Result<()> {
@@ -345,9 +398,11 @@ impl<'r, 'b> Runner<'r, 'b> {
             {
                 return Ok(Found {
                     point: self.pointer,
+                    rect: (self.pointer.0, self.pointer.1, 0.0, 0.0),
+                    value: None,
                 });
             }
-            let attempt = self.find(target);
+            let attempt = self.find(target, text);
             match attempt {
                 Ok(found) => return Ok(found),
                 Err(e) if start.elapsed() >= timeout => return Err(e),
@@ -361,8 +416,9 @@ impl<'r, 'b> Runner<'r, 'b> {
         }
     }
 
-    /// Find `target` once.
-    fn find(&self, target: &Target) -> Result<Found, String> {
+    /// Find `target` once. With `text`, a text field whose contents equal
+    /// the target's name matches too.
+    fn find(&self, target: &Target, text: bool) -> Result<Found, String> {
         let apps = self.apps_for(target)?;
         let mut trees: Vec<(App, Vec<Node>)> = apps
             .into_iter()
@@ -381,7 +437,10 @@ impl<'r, 'b> Runner<'r, 'b> {
                 nodes
                     .iter()
                     .enumerate()
-                    .filter(|(_, n)| n.name == target.name)
+                    .filter(|(_, n)| {
+                        n.name == target.name
+                            || (text && n.text.as_deref() == Some(target.name.as_str()))
+                    })
                     .map(move |(i, _)| (a, i))
             })
             .collect();
@@ -509,7 +568,15 @@ impl<'r, 'b> Runner<'r, 'b> {
                 target.name, size.w, size.h
             ));
         }
-        Ok(Found { point })
+        let (left, top) = (
+            window.rect.loc.x as f64 + x as f64,
+            window.rect.loc.y as f64 + y as f64,
+        );
+        Ok(Found {
+            point,
+            rect: (left, top, w as f64, h as f64),
+            value: node.value,
+        })
     }
 }
 
@@ -577,6 +644,15 @@ fn describe(nodes: &[Node], i: usize) -> String {
 
 fn not_found(target: &Target, trees: &[(App, Vec<Node>)], named: &[(usize, usize)]) -> String {
     let mut out = format!("nothing showing matches \"{}\"", target.name);
+    let fields: Vec<String> = trees
+        .iter()
+        .flat_map(|(_, nodes)| nodes.iter())
+        .filter_map(|n| Some(format!("{} {:?}", n.role, n.text.as_ref()?)))
+        .take(8)
+        .collect();
+    if !fields.is_empty() {
+        out.push_str(&format!("; text fields contain {}", fields.join(", ")));
+    }
     if !named.is_empty() {
         out.push_str("; with that name but other context:");
         for &(a, i) in named.iter().take(8) {

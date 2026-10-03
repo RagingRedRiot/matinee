@@ -18,7 +18,9 @@ This staging is declared per step in the storyboard. The demoed program
 itself is never staged: its GUI or terminal result comes from a real run.
 
 The first reproducibility promise is **the same observable story** under a
-pinned app build, fixtures, theme, locale, screen geometry, fonts, and clock.
+pinned app build, fixtures, theme, locale, screen geometry, and fonts. The
+clock is deliberately left running: live labels such as "updated 3s ago" are
+part of what a demo shows.
 We will measure visual stability separately. Byte-identical GIFs across
 machines are not a release promise until the app clock, animation scheduling,
 terminal rendering, compositor frames, and encoders are controlled and tested.

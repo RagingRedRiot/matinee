@@ -80,8 +80,6 @@ pub struct Demo {
     pub scale: u32,
     pub fps: u32,
     pub themes: Vec<Theme>,
-    /// The pinned wall clock, as written (RFC 3339).
-    pub clock: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
@@ -332,7 +330,6 @@ struct RawDemo {
     scale: Option<u32>,
     fps: Option<u32>,
     themes: Option<Vec<Theme>>,
-    clock: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -468,7 +465,6 @@ impl RawStory {
             scale,
             fps,
             themes,
-            clock: d.clock,
         };
 
         let seeds = self

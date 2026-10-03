@@ -5,7 +5,6 @@
 output = "docs/assets/demo"          # demo-light.gif, demo-dark.gif
 size = [1200, 720]
 themes = ["light", "dark"]
-clock = "2026-10-01T09:00:00Z"        # pinned
 
 [[seed]]                             # before app launch, in a throwaway $HOME
 run = "callboard put reviews < fixtures/reviews.json"

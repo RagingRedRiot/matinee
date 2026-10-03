@@ -32,9 +32,10 @@ matinee should record:
    target fails loudly. Window-relative coordinates are an explicit fallback
    for apps without useful accessibility data.
 4. **The same script tells the same story.** Fixed window size, scale,
-   and theme; a pinned clock so "updated 3s ago" never ticks; seeded data in
-   a throwaway home. Visual stability is measured under a pinned environment;
-   byte identity is a separate, stronger goal.
+   and theme; seeded data in a throwaway home; a camera that moves the same
+   way every run. The clock is left alone: "updated 3s ago" ticking is part
+   of what makes a demo look alive, so recordings are compared by the story
+   they tell, not byte for byte.
 5. **Small and sharp.** Recordings belong in READMEs, so they are encoded to
    load fast: only changed regions stored, holds as single long frames, one
    palette per clip. Video can be explored later if a story cannot stay small
@@ -58,7 +59,6 @@ A sketch of the format, to be refined by building it:
 output = "docs/assets/demo"          # demo-light.gif, demo-dark.gif
 size = [1200, 720]
 themes = ["light", "dark"]
-clock = "2026-10-01T09:00:00Z"        # pinned
 
 [[seed]]                             # before app launch, in a throwaway $HOME
 run = "callboard put reviews < fixtures/reviews.json"
@@ -104,7 +104,7 @@ steps = [
 ## How it works (planned)
 
 - **Session:** each demo runs in a headless desktop session, with seeded
-  state, a pinned clock, and a process and filesystem boundary that has been
+  state and a process and filesystem boundary that has been
   tested against apps that ignore XDG paths. The compositor and the
   boundary are built into matinee, not external tools.
 - **Targets:** the accessibility tree (AT-SPI on Linux) finds widgets by name,

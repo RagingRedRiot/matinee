@@ -27,7 +27,7 @@ use std::{
 };
 
 const REGULAR: &[u8] = include_bytes!("../assets/fonts/DejaVuSansMono.ttf");
-const BOLD: &[u8] = include_bytes!("../assets/fonts/DejaVuSansMono-Bold.ttf");
+pub(crate) const BOLD: &[u8] = include_bytes!("../assets/fonts/DejaVuSansMono-Bold.ttf");
 
 /// The prompt matinee draws before each command: a bold cyan `$`.
 const PROMPT: &str = "\x1b[1;36m$\x1b[0m ";
@@ -168,6 +168,11 @@ impl Terminal {
         self.master.write_all(bytes)
     }
 
+    /// Whether the running program has asked for application cursor keys.
+    pub fn application_cursor(&self) -> bool {
+        self.screen.lock().unwrap().screen().application_cursor()
+    }
+
     /// Whether the terminal shows `text` anywhere on screen.
     pub fn contains(&self, text: &str) -> bool {
         self.screen
@@ -224,43 +229,6 @@ fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
         return Err(io::Error::last_os_error());
     }
     Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
-}
-
-/// The bytes a terminal receives for a key chord, such as `enter` or
-/// `ctrl+c`.
-pub fn chord_bytes(chord: &str) -> Result<Vec<u8>, String> {
-    let lower = chord.to_ascii_lowercase();
-    let (mods, key) = match lower.rsplit_once('+') {
-        Some((mods, key)) if !key.is_empty() => (mods, key),
-        _ => ("", lower.as_str()),
-    };
-    if mods == "ctrl" && key.len() == 1 {
-        let c = key.as_bytes()[0];
-        if c.is_ascii_lowercase() {
-            return Ok(vec![c - b'a' + 1]);
-        }
-    }
-    if !mods.is_empty() {
-        return Err(format!("`{chord}` cannot be sent to the terminal"));
-    }
-    Ok(match key {
-        "enter" | "return" => b"\r".to_vec(),
-        "tab" => b"\t".to_vec(),
-        "escape" | "esc" => b"\x1b".to_vec(),
-        "backspace" => b"\x7f".to_vec(),
-        "space" => b" ".to_vec(),
-        "up" => b"\x1b[A".to_vec(),
-        "down" => b"\x1b[B".to_vec(),
-        "right" => b"\x1b[C".to_vec(),
-        "left" => b"\x1b[D".to_vec(),
-        "home" => b"\x1b[H".to_vec(),
-        "end" => b"\x1b[F".to_vec(),
-        "delete" | "del" => b"\x1b[3~".to_vec(),
-        "pageup" => b"\x1b[5~".to_vec(),
-        "pagedown" => b"\x1b[6~".to_vec(),
-        k if k.chars().count() == 1 => k.as_bytes().to_vec(),
-        _ => return Err(format!("`{chord}` is not a key name")),
-    })
 }
 
 /// A rasterized glyph's character, weight (bold or not), and scale.
@@ -457,19 +425,5 @@ fn blend(frame: &mut Frame, x0: i64, y0: i64, w: usize, h: usize, alpha: &[u8], 
             };
             frame.pixels[at] = 0xff000000 | mix(16) | mix(8) | mix(0);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn chords_for_the_terminal() {
-        assert_eq!(chord_bytes("enter").unwrap(), b"\r");
-        assert_eq!(chord_bytes("ctrl+c").unwrap(), [3]);
-        assert_eq!(chord_bytes("up").unwrap(), b"\x1b[A");
-        assert_eq!(chord_bytes("q").unwrap(), b"q");
-        assert!(chord_bytes("ctrl+shift+t").is_err());
     }
 }

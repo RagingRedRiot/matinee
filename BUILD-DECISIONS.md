@@ -148,6 +148,13 @@ broader set of host Unix sockets and system paths. Document explicit opt-ins
 for stories that need outside access. A temporary `HOME` alone must never be
 presented as full isolation.
 
+`--no-isolation` is that kind of opt-out, for systems that do not allow
+unprivileged user namespaces. It skips the namespaces only: the session,
+steps, and recording are unchanged, and commands still get a fresh home,
+runtime folder, and environment. Leftover processes are stopped by a
+subreaper rather than PID 1. matinee warns on every use that host files and
+the network are reachable.
+
 ## Output contract
 
 GIF is the primary output. The existing
@@ -159,17 +166,30 @@ and check legibility at README width. A particularly motion-heavy story may
 motivate optional video support later, but video playback is not a build gate.
 `record` warns when a GIF is over budget: 2 MiB per theme with a still
 camera, and 5 MiB when the camera moves. Size alone is not a pass: the
-text acted on must remain legible at 400-pixel display width.
+text acted on must remain legible at the width the recording is read at,
+800 pixels by default (about a README column on a desktop), or what the
+story sets as `[camera] reading_width`. Measured on callboard's demo, text
+reads at 800 pixels; at 400 only the captions do, so a story meant for
+narrow screens sets a smaller reading width and accepts more zoom.
 
 The camera's moves are most of a moving GIF's size: a move changes nearly
 every pixel of each frame it spans (callboard's demo measured 3.1 of
 4.5 MB in 42 such frames). So the camera stays put whenever it can. It
-zooms only as far as text needs to read at an 800-pixel display width, so
-an output no wider than that never zooms on its own. It stays while the
+zooms only as far as text needs to read at the reading width, so an
+output no wider than that never zooms on its own. It stays while the
 next target is comfortably in view and readable. Each move eases over
 0.4 seconds by default and is stored at half the frame rate. With these,
-callboard's 40-second demo is about 4 MB per theme, against 2.4 MB with a
-fixed camera.
+callboard's 40-second demo was about 4 MB per theme, against 2.4 MB with a
+fixed camera. Three encoder changes have since brought it to about 2.4 MB
+per theme, with captions, click ripples, and key badges included: pixels
+that did not change inside a changed rectangle are stored as transparent,
+or as their own color where that continues a run; the palette is chosen by
+median cut and k-means from how long each color is on screen; and LZW
+compression may let a color move by up to 6 in any channel (`[demo] lossy`,
+0 for exact), which looked the same in side-by-side frames (at 12, streaks
+showed in flat light areas). The fixed-camera figure has not been measured again. `record`
+prints each scene's seconds and kilobytes, and how much of that came
+while the camera moved.
 
 Light and dark come from the session, not the app: matinee serves the desktop
 portal's settings on the session bus (the `color-scheme` that libadwaita,
@@ -204,8 +224,10 @@ dependencies of the finished tool.
   only argument is a struct as separate arguments, and the AT-SPI registry
   crashes on the first app that registers.
 - **Encoder:** a GIF encoder in matinee, built for this output: changed
-  regions only, holds merged into long frames, one palette per clip, and
-  per-scene size reporting.
+  regions only, with unchanged pixels inside them transparent, holds merged
+  into long frames, one palette per clip from its colors' time on screen,
+  slightly lossy LZW of its own, and per-scene size reporting. The `gif`
+  crate writes only the file's structure.
 - **Timeline:** recording time is a frame index, not wall-clock time. The
   camera path, eased pointer motion, and capture schedule are planned on
   that timeline, so the same story yields the same camera path. Waiting for

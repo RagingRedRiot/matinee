@@ -111,3 +111,42 @@ fn seeds_run_before_the_story_and_fail_it_when_they_fail() {
     );
     assert!(text.contains("oops"), "{text}");
 }
+
+#[test]
+fn keys_reach_a_program_left_running() {
+    // `read` echoes what is typed, through the terminal's own echo, and
+    // the subshell prints what it read once Enter arrives.
+    let command = "(read -p 'name? ' n && echo hello $n && read -n 1 && exit 3)";
+    let story = format!(
+        "{HEAD}[[scene]]\nsteps = [\n  {{ run = \"{command}\", wait = false, exit = 3 }},\n  {{ wait_for = \"name?\" }},\n  {{ type = \"Ada\" }},\n  {{ key = \"enter\" }},\n  {{ expect = \"hello Ada\" }},\n  {{ key = \"q\" }},\n  {{ wait_exit = \"{command}\" }},\n]\n"
+    );
+    let (ok, text) = run_text("keys", &story, &[]);
+    assert!(ok, "{text}");
+}
+
+#[test]
+fn a_program_left_running_is_checked_at_the_end() {
+    let (ok, text) = run_text(
+        "end",
+        &format!("{HEAD}[[scene]]\nsteps = [{{ run = \"(exit 4)\", wait = false }}]\n"),
+        &[],
+    );
+    assert!(!ok, "{text}");
+    assert!(
+        text.contains("end of story: `(exit 4)` exited with 4, expected 0"),
+        "{text}"
+    );
+}
+
+#[test]
+fn keys_to_a_program_that_has_exited_fail() {
+    let (ok, text) = run_text(
+        "exited",
+        &format!(
+            "{HEAD}[[scene]]\nsteps = [\n  {{ run = \"true\", wait = false }},\n  {{ hold = \"300ms\" }},\n  {{ type = \"x\" }},\n]\n"
+        ),
+        &[],
+    );
+    assert!(!ok, "{text}");
+    assert!(text.contains("`true` already exited with 0"), "{text}");
+}

@@ -11,6 +11,7 @@ run matinee again, and the demo is current.
 
 ```sh
 matinee record demo.toml        # perform the demo and write a GIF per theme
+matinee record                  # record every storyboard under this folder
 matinee run demo.toml           # perform it and check every step, without recording
 matinee check demo.toml         # read the storyboard and report mistakes, without running it
 matinee probe demo.toml         # list the windows and what steps can target in them
@@ -38,6 +39,10 @@ Linux with unprivileged user namespaces (on Ubuntu, see
 runs GTK or Qt already has: `dbus-daemon`, at-spi2-core, libpixman, and
 libxkbcommon. Apps that use OpenGL fall back to Mesa's software renderer.
 matinee runs its own compositor, so it needs no desktop session or GPU.
+Where user namespaces are not allowed, such as some CI runners,
+`--no-isolation` runs stories on the host instead: they still get a fresh
+home, environment, display, and buses, but can read your files and use the
+network.
 
 ```sh
 cargo build --release

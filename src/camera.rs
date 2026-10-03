@@ -49,10 +49,10 @@ const FILL: f64 = 0.4;
 /// The middle part of the view a target may sit in without the camera
 /// moving.
 const COMFORT: f64 = 0.9;
-/// How wide a recording is usually shown, in pixels: about the width of a
-/// README's column. Text drawn at its normal size stays readable when the
-/// output is no wider than this.
-pub const VIEWED_WIDTH: f64 = 800.0;
+/// How wide a recording is usually shown, in pixels, unless a story says
+/// otherwise: about the width of a README's column on a desktop. Text drawn
+/// at its normal size stays readable when the output is no wider than this.
+pub const READING_WIDTH: u32 = 800;
 /// A view zoomed at least this close to the wanted zoom is readable
 /// enough to stay put.
 const ZOOM_SLACK: f64 = 1.25;
@@ -62,7 +62,7 @@ pub struct Camera {
     screen: (f64, f64),
     max_zoom: f64,
     /// The zoom that shows text at its normal size when the recording is
-    /// viewed `VIEWED_WIDTH` wide. Auto framing zooms no further.
+    /// viewed at its reading width. Auto framing zooms no further.
     reading_zoom: f64,
     /// Frames each move takes.
     frames: u32,
@@ -76,13 +76,21 @@ pub struct Camera {
 
 impl Camera {
     /// A camera over a screen of `width` by `height` points, zooming in at
-    /// most `max_zoom` times, each move taking `frames` frames.
-    pub fn new(width: f64, height: f64, max_zoom: f64, frames: u32, fixed: bool) -> Camera {
+    /// most `max_zoom` times, each move taking `frames` frames, for a
+    /// recording viewed `reading_width` pixels wide.
+    pub fn new(
+        width: f64,
+        height: f64,
+        max_zoom: f64,
+        frames: u32,
+        fixed: bool,
+        reading_width: u32,
+    ) -> Camera {
         let all = Rect::new(0.0, 0.0, width, height);
         Camera {
             screen: (width, height),
             max_zoom: max_zoom.max(1.0),
-            reading_zoom: (width / VIEWED_WIDTH).max(1.0),
+            reading_zoom: (width / reading_width as f64).max(1.0),
             frames: frames.max(1),
             fixed,
             current: all,
@@ -181,7 +189,7 @@ mod tests {
 
     /// A 1600-point screen: it needs 2x to read at the usual width.
     fn camera() -> Camera {
-        Camera::new(1600.0, 1000.0, 2.0, 9, false)
+        Camera::new(1600.0, 1000.0, 2.0, 9, false, READING_WIDTH)
     }
 
     fn settle(c: &mut Camera) -> usize {
@@ -206,7 +214,7 @@ mod tests {
 
     #[test]
     fn a_screen_no_wider_than_it_is_viewed_needs_no_zoom() {
-        let mut c = Camera::new(800.0, 600.0, 2.0, 9, false);
+        let mut c = Camera::new(800.0, 600.0, 2.0, 9, false, READING_WIDTH);
         assert!(!c.frame(Rect::new(20.0, 10.0, 40.0, 20.0), None));
         // An explicit zoom still applies.
         assert!(c.frame(Rect::new(20.0, 10.0, 40.0, 20.0), Some(1.5)));
@@ -253,7 +261,7 @@ mod tests {
 
     #[test]
     fn a_fixed_camera_never_moves() {
-        let mut c = Camera::new(1200.0, 800.0, 2.0, 9, true);
+        let mut c = Camera::new(1200.0, 800.0, 2.0, 9, true, READING_WIDTH);
         assert!(!c.frame(Rect::new(20.0, 10.0, 40.0, 20.0), None));
         c.step();
         assert_eq!(c.zoom(), 1.0);
@@ -268,6 +276,24 @@ mod tests {
         assert_eq!(
             c.to_output((400.0, 250.0), (1600.0, 1000.0)),
             (800.0, 500.0)
+        );
+    }
+
+    #[test]
+    fn a_narrower_reading_width_reads_closer() {
+        // A 1600-point screen read at 800 pixels needs 2x, at 400 needs 4x,
+        // up to the camera's limit.
+        assert_eq!(
+            Camera::new(1600.0, 1000.0, 8.0, 9, false, 800).reading_zoom,
+            2.0
+        );
+        assert_eq!(
+            Camera::new(1600.0, 1000.0, 8.0, 9, false, 400).reading_zoom,
+            4.0
+        );
+        assert_eq!(
+            Camera::new(600.0, 400.0, 8.0, 9, false, 800).reading_zoom,
+            1.0
         );
     }
 }

@@ -3,7 +3,7 @@
 //! isolation boundary.
 
 use crate::{
-    boundary::{Boundary, HOME},
+    boundary::Boundary,
     bus::Buses,
     camera::{Camera, Rect},
     compositor::{Compositor, Frame},
@@ -14,7 +14,7 @@ use crate::{
 };
 use std::{
     io,
-    path::{Path, PathBuf},
+    path::Path,
     process::Child,
     time::{Duration, Instant},
 };
@@ -40,6 +40,10 @@ pub struct Session<'a> {
     terminal: Option<(Terminal, Pane)>,
     /// Whether recordings draw the pointer: only once a step has used it.
     pointer_shown: bool,
+    /// Windows already reported as too big for the window area.
+    oversized: Vec<String>,
+    /// How far recordings' lossy compression may move a color.
+    lossy: u8,
     /// What recordings show of the screen.
     pub camera: Camera,
 }
@@ -48,9 +52,9 @@ impl<'a> Session<'a> {
     /// Start the session for `story` in `theme`. Call this inside the
     /// boundary.
     pub fn start(boundary: &'a Boundary, story: &Story, theme: Theme) -> io::Result<Session<'a>> {
-        let runtime = PathBuf::from(format!("/run/user/{}", unsafe { libc::getuid() }));
+        let runtime = boundary.runtime_dir().to_path_buf();
         let buses = Buses::start(boundary, &runtime, theme)?;
-        let keyfile = Path::new(HOME).join(".config/glib-2.0/settings/keyfile");
+        let keyfile = boundary.home().join(".config/glib-2.0/settings/keyfile");
         std::fs::create_dir_all(keyfile.parent().unwrap())?;
         std::fs::write(&keyfile, portal::Settings::new(theme).keyfile())?;
         let mut compositor = Compositor::new(
@@ -96,12 +100,15 @@ impl<'a> Session<'a> {
             recording: None,
             terminal,
             pointer_shown: false,
+            oversized: vec![],
+            lossy: story.demo.lossy,
             camera: Camera::new(
                 w as f64,
                 h as f64,
                 story.camera.max_zoom.min(story.demo.scale as f64),
                 (story.camera.ease.as_secs_f64() * story.demo.fps as f64).round() as u32,
                 story.camera.mode == CameraMode::Fixed,
+                story.camera.reading_width,
             ),
         })
     }
@@ -111,7 +118,7 @@ impl<'a> Session<'a> {
     /// A leading `~/` in `program` means the session's home folder.
     pub fn spawn(&mut self, name: &str, program: &str, args: &[String]) -> io::Result<()> {
         let program = match program.strip_prefix("~/") {
-            Some(rest) => format!("{HOME}/{rest}"),
+            Some(rest) => format!("{}/{rest}", self.boundary.home().display()),
             None => program.to_owned(),
         };
         let program = program.as_str();
@@ -248,6 +255,33 @@ impl<'a> Session<'a> {
         }
     }
 
+    /// Warn, once per window, about a window that does not fit the window
+    /// area: an app with a larger minimum size keeps it, and the rest is
+    /// hidden behind the terminal pane or past the screen's edge.
+    fn warn_oversized(&mut self) {
+        let (x, y, w, h) = self.compositor.window_area();
+        for window in self.compositor.windows() {
+            let r = window.rect;
+            let fits = r.loc.x >= x
+                && r.loc.y >= y
+                && r.loc.x + r.size.w <= x + w
+                && r.loc.y + r.size.h <= y + h;
+            if !window.placed || fits || self.oversized.contains(&window.title) {
+                continue;
+            }
+            let hidden = if self.terminal.is_some() {
+                "behind the terminal pane; make the story's size larger or the pane smaller"
+            } else {
+                "past the screen's edge; make the story's size larger"
+            };
+            eprintln!(
+                "matinee: warning: window \"{}\" is {}x{} points, larger than its {w}x{h} area, so part of it is hidden {hidden}",
+                window.title, window.rect.size.w, window.rect.size.h,
+            );
+            self.oversized.push(window.title);
+        }
+    }
+
     /// Device pixels per point.
     pub fn scale(&self) -> u32 {
         self.scale
@@ -271,6 +305,7 @@ impl<'a> Session<'a> {
             }
         }
         self.check_children()?;
+        self.warn_oversized();
         self.frames += 1;
         let mut frame = self.compositor.render(self.now())?;
         if let Some((terminal, pane)) = &self.terminal {
@@ -303,11 +338,42 @@ impl<'a> Session<'a> {
 
     /// Keep every frame from now on.
     pub fn start_recording(&mut self) {
-        self.recording = Some(Recording::new(
+        let mut recording = Recording::new(
             self.size[0] as usize,
             self.size[1] as usize,
             self.scale as usize,
-        ));
+        );
+        recording.set_pane(self.pane_rect());
+        recording.set_lossy(self.lossy);
+        self.recording = Some(recording);
+    }
+
+    /// Start a new part of the recording, for size reporting.
+    pub fn mark_segment(&mut self, label: &str) {
+        if let Some(recording) = &mut self.recording {
+            recording.segment(label);
+        }
+    }
+
+    /// Caption what is recorded from now on, or stop with `None`.
+    pub fn caption(&mut self, text: Option<&str>) {
+        if let Some(recording) = &mut self.recording {
+            recording.caption(text);
+        }
+    }
+
+    /// Mark a click in the recording, where the pointer is.
+    pub fn mark_click(&mut self) {
+        if let Some(recording) = &mut self.recording {
+            recording.click();
+        }
+    }
+
+    /// Mark a key chord in the recording, to show on a badge.
+    pub fn mark_key(&mut self, chord: &str) {
+        if let Some(recording) = &mut self.recording {
+            recording.key(chord);
+        }
     }
 
     /// Stop keeping frames and return what was kept.

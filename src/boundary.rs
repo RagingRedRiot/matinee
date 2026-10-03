@@ -20,6 +20,14 @@
 //!
 //! No step needs privileges, but the kernel must allow unprivileged user
 //! namespaces.
+//!
+//! Where it does not, as on some CI runners, a boundary can be made
+//! without isolation. Stories then run on the host as themselves: commands
+//! and apps still get a fresh home, runtime folder, and environment, and
+//! the session's own display and buses, so every step and recording works
+//! the same, but they can read the host's files and use its network. The
+//! work runs in a child that adopts every orphaned process, and whatever is
+//! left when it returns is stopped, as PID 1 would.
 
 use crate::story::Story;
 use std::{
@@ -79,6 +87,12 @@ pub struct Boundary {
     path: Vec<PathBuf>,
     /// Host folder shown writable at [`WORK`].
     work_dir: PathBuf,
+    /// Whether the work runs inside namespaces.
+    isolated: bool,
+    /// The home, runtime, and work folders, as the session sees them.
+    home: PathBuf,
+    runtime: PathBuf,
+    work: PathBuf,
 }
 
 impl Boundary {
@@ -142,7 +156,57 @@ impl Boundary {
             mounts,
             path: path_dirs,
             work_dir: fs::canonicalize(work_dir)?,
+            isolated: true,
+            home: HOME.into(),
+            runtime: format!("/run/user/{}", unsafe { libc::getuid() }).into(),
+            work: WORK.into(),
         })
+    }
+
+    /// The same boundary without isolation: the work runs on the host, with
+    /// its home and runtime folders inside the work folder.
+    pub fn without_isolation(mut self) -> io::Result<Boundary> {
+        let session = self.work_dir.join("session");
+        let runtime = session.join("run");
+        // Sockets live in the runtime folder, and a socket's path must fit
+        // in 108 bytes; the longest matinee makes adds about 30.
+        if runtime.as_os_str().len() > 70 {
+            return Err(io::Error::other(format!(
+                "{} is too long a path for the session's sockets; set TMPDIR to a \
+                 shorter folder",
+                runtime.display()
+            )));
+        }
+        self.story_dir = self.project_dir.join(
+            self.story_dir
+                .strip_prefix(PROJECT)
+                .unwrap_or(&self.story_dir),
+        );
+        self.home = session.join("home");
+        self.runtime = runtime;
+        self.work = self.work_dir.clone();
+        self.isolated = false;
+        Ok(self)
+    }
+
+    /// Whether the work runs inside namespaces.
+    pub fn is_isolated(&self) -> bool {
+        self.isolated
+    }
+
+    /// The session's home folder.
+    pub fn home(&self) -> &Path {
+        &self.home
+    }
+
+    /// The session's runtime folder, for its display and bus sockets.
+    pub fn runtime_dir(&self) -> &Path {
+        &self.runtime
+    }
+
+    /// Where results go, to come back to the caller.
+    pub fn work(&self) -> &Path {
+        &self.work
     }
 
     /// `PATH` inside: the storyboard's `session.path`, then the system's.
@@ -164,21 +228,21 @@ impl Boundary {
     /// storyboard's folder.
     pub fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
         let mut cmd = Command::new(program);
-        let uid = unsafe { libc::getuid() };
+        let home = self.home.display();
         cmd.env_clear()
             .current_dir(&self.story_dir)
-            .env("HOME", HOME)
+            .env("HOME", &self.home)
             .env("USER", HOSTNAME)
             .env("LOGNAME", HOSTNAME)
             .env("PATH", self.search_path())
             .env("LANG", "C.UTF-8")
             .env("TZ", "UTC")
             .env("TERM", "xterm-256color")
-            .env("XDG_RUNTIME_DIR", format!("/run/user/{uid}"))
-            .env("XDG_CONFIG_HOME", format!("{HOME}/.config"))
-            .env("XDG_DATA_HOME", format!("{HOME}/.local/share"))
-            .env("XDG_CACHE_HOME", format!("{HOME}/.cache"))
-            .env("XDG_STATE_HOME", format!("{HOME}/.local/state"));
+            .env("XDG_RUNTIME_DIR", &self.runtime)
+            .env("XDG_CONFIG_HOME", format!("{home}/.config"))
+            .env("XDG_DATA_HOME", format!("{home}/.local/share"))
+            .env("XDG_CACHE_HOME", format!("{home}/.cache"))
+            .env("XDG_STATE_HOME", format!("{home}/.local/state"));
         cmd
     }
 
@@ -190,6 +254,9 @@ impl Boundary {
             return Err(io::Error::other(
                 "the isolation boundary must be created before any threads start",
             ));
+        }
+        if !self.isolated {
+            return self.run_on_host(inside);
         }
         let exe = std::env::current_exe()?;
         let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
@@ -233,10 +300,84 @@ impl Boundary {
     }
 }
 
+impl Boundary {
+    /// Run `inside` on the host, in a child that adopts orphaned processes,
+    /// with a fresh home and runtime folder; stop whatever is left after.
+    fn run_on_host(&self, inside: impl FnOnce() -> i32) -> io::Result<i32> {
+        for dir in [&self.home, &self.runtime] {
+            match fs::remove_dir_all(dir) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
+            fs::create_dir_all(dir)?;
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+        }
+        match check(unsafe { libc::fork() })? {
+            0 => {
+                let code = match set_parent_death_signal()
+                    .and_then(|()| check(unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) }))
+                {
+                    Ok(_) => {
+                        unsafe { libc::umask(0o022) };
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(inside))
+                            .unwrap_or(101)
+                    }
+                    Err(e) => {
+                        eprintln!("matinee: starting the session: {e}");
+                        125
+                    }
+                };
+                stop_descendants();
+                unsafe { libc::_exit(code) }
+            }
+            child => wait(child),
+        }
+    }
+}
+
+/// Stop every process this one has adopted or started, and their children,
+/// which come to this process as their parents stop.
+fn stop_descendants() {
+    let me = std::process::id();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let children = children_of(me);
+        if children.is_empty() || std::time::Instant::now() > deadline {
+            break;
+        }
+        for pid in children {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        // Collect the stopped ones, so they are not found again.
+        let mut status = 0;
+        while unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) } > 0 {}
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// The processes whose parent is `parent`.
+fn children_of(parent: u32) -> Vec<libc::pid_t> {
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return vec![];
+    };
+    entries
+        .filter_map(|e| {
+            let pid: libc::pid_t = e.ok()?.file_name().to_str()?.parse().ok()?;
+            let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+            // The command name is in parentheses and may hold spaces; the
+            // parent's PID is the second field after it.
+            let rest = &stat[stat.rfind(')')? + 1..];
+            let ppid: u32 = rest.split_whitespace().nth(1)?.parse().ok()?;
+            (ppid == parent).then_some(pid)
+        })
+        .collect()
+}
+
 fn userns_hint(e: &io::Error) -> &'static str {
     if e.raw_os_error() == Some(libc::EPERM) || e.raw_os_error() == Some(libc::EACCES) {
         "; this system does not allow unprivileged user namespaces \
-         (on Ubuntu, see kernel.apparmor_restrict_unprivileged_userns)"
+         (on Ubuntu, see kernel.apparmor_restrict_unprivileged_userns), \
+         or pass --no-isolation to run without them"
     } else {
         ""
     }

@@ -48,6 +48,8 @@ fn defaults() {
     assert_eq!(story.demo.fps, 15);
     assert_eq!(story.demo.themes, [Theme::Light, Theme::Dark]);
     assert_eq!(story.camera.ease, Duration::from_millis(400));
+    assert_eq!(story.camera.reading_width, 800);
+    assert_eq!(story.demo.lossy, 6);
     assert_eq!(story.launches[0].name, "watch-file");
 }
 
@@ -62,6 +64,7 @@ fn staged_run_shows_one_command_and_runs_another() {
             command: "cat prs.txt".into(),
             shown: Some("gh pr list".into()),
             exit: 0,
+            wait: true,
         }
     );
 }
@@ -215,4 +218,110 @@ fn coordinate_steps() {
     )
     .unwrap_err();
     assert!(e.contains("launches none"), "{e}");
+}
+
+/// A terminal-only storyboard, with no app launched.
+fn parse_terminal(steps: &str) -> Result<Story, String> {
+    Story::parse(
+        &format!("[demo]\noutput = \"t\"\nsize = [640, 360]\n[[scene]]\nsteps = [\n{steps}\n]\n"),
+        PathBuf::from("tests"),
+    )
+}
+
+#[test]
+fn keys_go_to_a_program_left_running_in_the_terminal() {
+    let story = parse(
+        r#"{ run = "less notes.txt", wait = false },
+           { type = "/retry", in = "terminal" },
+           { key = "q", in = "terminal" },
+           { wait_exit = "less notes.txt" },
+           { key = "ctrl+k" }"#,
+    )
+    .unwrap();
+    let actions: Vec<&Action> = story.steps().map(|s| &s.action).collect();
+    assert!(matches!(actions[0], Action::Run { wait: false, .. }));
+    assert_eq!(
+        actions[1],
+        &Action::Type {
+            text: "/retry".into(),
+            terminal: true
+        }
+    );
+    assert_eq!(
+        actions[4],
+        &Action::Key {
+            chord: "ctrl+k".into(),
+            terminal: false
+        },
+        "without `in`, keys go to the app"
+    );
+
+    // With no app, keys go to the terminal on their own.
+    let story =
+        parse_terminal(r#"{ run = "cat", wait = false }, { type = "hi" }, { key = "ctrl+d" }"#)
+            .unwrap();
+    assert!(story.steps().skip(1).all(|s| matches!(
+        s.action,
+        Action::Type { terminal: true, .. } | Action::Key { terminal: true, .. }
+    )));
+}
+
+#[test]
+fn wait_exit_may_name_the_command_shown() {
+    parse_terminal(
+        r#"{ terminal = "htop", run = "top -b -n 1", wait = false }, { wait_exit = "htop" }"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn terminal_steps_run_one_command_at_a_time() {
+    let error = |steps| parse_terminal(steps).expect_err("storyboard should be rejected");
+    assert!(
+        error(r#"{ run = "cat", wait = false }, { run = "ls" }"#)
+            .contains("scene 1, step 2: this runs a command while `cat` is still running"),
+    );
+    assert!(
+        error(r#"{ run = "cat", wait = false }, { wait_exit = "ls" }"#)
+            .contains("names no running command; `cat` is running")
+    );
+    assert!(error(r#"{ wait_exit = "cat" }"#).contains("no command is running"));
+    assert!(error(r#"{ type = "hi" }"#).contains("nothing is running there"));
+    assert!(
+        error(r#"{ run = "cat", wait = false, timeout = "5s" }"#)
+            .contains("put it on the `wait_exit` step")
+    );
+    assert!(
+        error(r#"{ run = "cat", wait = false }, { key = "super+a" }"#)
+            .contains("does not reach a program in the terminal")
+    );
+    assert!(error(r#"{ wait = false, click = "Go" }"#).contains("`wait` only applies to run"));
+    assert!(
+        parse(r#"{ type = "hi", in = "watch-file" }"#)
+            .unwrap_err()
+            .contains("keys go to the focused window, or to the terminal")
+    );
+}
+
+#[test]
+fn reading_width_and_lossy_can_be_set() {
+    // Settings in the `demo` and `camera` tables, before a minimal story.
+    let story = |demo: &str, camera: &str| {
+        Story::parse(
+            &format!(
+                "[demo]\noutput = \"d\"\nsize = [800, 480]\n{demo}\n[camera]\n{camera}\n\
+                 [launch]\napp = \"x\"\n[[scene]]\nsteps = [{{ click = \"Go\" }}]\n"
+            ),
+            PathBuf::from("tests"),
+        )
+    };
+    assert_eq!(story("lossy = 0", "").unwrap().demo.lossy, 0);
+    assert!(story("lossy = 40", "").unwrap_err().contains("demo.lossy"));
+    let narrow = story("", "reading_width = 400").unwrap();
+    assert_eq!(narrow.camera.reading_width, 400);
+    assert!(
+        story("", "reading_width = 50")
+            .unwrap_err()
+            .contains("camera.reading_width")
+    );
 }

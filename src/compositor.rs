@@ -53,8 +53,8 @@ use smithay::{
     wayland::{
         buffer::BufferHandler,
         compositor::{
-            CompositorClientState, CompositorHandler, CompositorState, get_parent,
-            is_sync_subsurface, with_states,
+            CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes,
+            get_parent, is_sync_subsurface, with_states,
         },
         output::{OutputHandler, OutputManagerState},
         selection::{
@@ -286,11 +286,9 @@ impl Compositor {
                 .map_err(io::Error::other)?;
             // An app's drag icon follows the pointer, above every window.
             let icon: Vec<WaylandSurfaceRenderElement<PixmanRenderer>> = match &state.dnd_icon {
-                Some(icon) if icon.is_alive() => {
+                Some((icon, offset)) if icon.is_alive() => {
                     let scale = state.output.current_scale().fractional_scale();
-                    let at = state
-                        .pointer()
-                        .current_location()
+                    let at = (state.pointer().current_location() + offset.to_f64())
                         .to_physical(scale)
                         .to_i32_round();
                     render_elements_from_surface_tree(
@@ -335,7 +333,7 @@ impl Compositor {
                 Some(state.output.clone())
             });
         }
-        if let Some(icon) = &state.dnd_icon {
+        if let Some((icon, _)) = &state.dnd_icon {
             smithay::desktop::utils::send_frames_surface_tree(
                 icon,
                 &state.output,
@@ -513,8 +511,9 @@ struct State {
     popups: PopupManager,
     /// Where toplevel windows go, in logical points.
     area: Rectangle<i32, Logical>,
-    /// The icon an app shows under the pointer while it drags.
-    dnd_icon: Option<WlSurface>,
+    /// The icon an app shows under the pointer while it drags, and where
+    /// its top-left corner sits relative to the pointer.
+    dnd_icon: Option<(WlSurface, Point<i32, Logical>)>,
     output: Output,
     dh: DisplayHandle,
 }
@@ -621,6 +620,21 @@ impl CompositorHandler for State {
 
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
+        // A drag icon moves by each buffer's offset, which is how an app
+        // sets the icon's hotspot.
+        if let Some((icon, offset)) = &mut self.dnd_icon {
+            if icon == surface {
+                *offset += with_states(surface, |states| {
+                    states
+                        .cached_state
+                        .get::<SurfaceAttributes>()
+                        .current()
+                        .buffer_delta
+                        .take()
+                        .unwrap_or_default()
+                });
+            }
+        }
         if !is_sync_subsurface(surface) {
             let mut root = surface.clone();
             while let Some(parent) = get_parent(&root) {
@@ -805,7 +819,7 @@ impl ClientDndGrabHandler for State {
         icon: Option<WlSurface>,
         _seat: Seat<Self>,
     ) {
-        self.dnd_icon = icon;
+        self.dnd_icon = icon.map(|icon| (icon, Point::default()));
     }
 
     fn dropped(&mut self, _target: Option<WlSurface>, _validated: bool, _seat: Seat<Self>) {

@@ -16,7 +16,9 @@
 //!
 //! A `run` step types its command line into the terminal pane, runs the
 //! command, and fails unless it exits with the expected status. A staged
-//! step types the command it shows and runs the one it names.
+//! step types the command it shows and runs the one it names. A `run` with
+//! `wait = false` leaves its command running, for `type` and `key` steps to
+//! send it keys, and checks its status at `wait_exit` or the story's end.
 
 use crate::{
     a11y::{A11y, App, Node},
@@ -93,6 +95,16 @@ pub struct Runner<'r, 'b> {
     session: &'r mut Session<'b>,
     a11y: A11y,
     pointer: (f64, f64),
+    /// A command left running in the terminal.
+    running: Option<Running>,
+}
+
+/// A command a `run` step started without waiting for it.
+struct Running {
+    command: String,
+    exit: i32,
+    /// Its status, once it has been seen to finish.
+    status: Option<i32>,
 }
 
 impl<'r, 'b> Runner<'r, 'b> {
@@ -103,6 +115,7 @@ impl<'r, 'b> Runner<'r, 'b> {
             session,
             a11y,
             pointer: (w as f64 / 2.0, h as f64 / 2.0),
+            running: None,
         })
     }
 
@@ -165,6 +178,12 @@ impl<'r, 'b> Runner<'r, 'b> {
     pub fn perform(&mut self, story: &Story) -> Result<usize, Failure> {
         let mut done = 0;
         for (si, scene) in story.scenes.iter().enumerate() {
+            let label = match &scene.caption {
+                Some(caption) => format!("scene {}: {caption}", si + 1),
+                None => format!("scene {}", si + 1),
+            };
+            self.session.mark_segment(&label);
+            self.session.caption(scene.caption.as_deref());
             for (ti, step) in scene.steps.iter().enumerate() {
                 self.step(step).map_err(|message| Failure {
                     at: format!("scene {}, step {}", si + 1, ti + 1),
@@ -172,6 +191,13 @@ impl<'r, 'b> Runner<'r, 'b> {
                 })?;
                 done += 1;
             }
+            self.session.caption(None);
+        }
+        if self.running.is_some() {
+            self.wait_exit(RUN_TIMEOUT).map_err(|message| Failure {
+                at: "end of story".into(),
+                message,
+            })?;
         }
         Ok(done)
     }
@@ -214,7 +240,34 @@ impl<'r, 'b> Runner<'r, 'b> {
                 self.move_to(start, TRAVEL).map_err(io)?;
                 self.drag(end).map_err(io)?;
             }
-            Action::Type(text) => {
+            Action::Type {
+                text,
+                terminal: true,
+            } => {
+                self.terminal_input()?;
+                let mut buf = [0; 4];
+                for c in text.chars() {
+                    let bytes = if c == '\n' {
+                        "\r"
+                    } else {
+                        c.encode_utf8(&mut buf)
+                    };
+                    self.terminal()?.send(bytes.as_bytes()).map_err(io)?;
+                    self.session.run_for(PER_KEY).map_err(io)?;
+                }
+            }
+            Action::Key {
+                chord,
+                terminal: true,
+            } => {
+                self.terminal_input()?;
+                let app_cursor = self.terminal()?.application_cursor();
+                let bytes = keys::terminal_bytes(chord, app_cursor)?;
+                self.session.mark_key(chord);
+                self.terminal()?.send(&bytes).map_err(io)?;
+                self.session.run_for(PER_KEY).map_err(io)?;
+            }
+            Action::Type { text, .. } => {
                 self.need_window("type")?;
                 for c in text.chars() {
                     let press = keys::for_char(c)
@@ -223,9 +276,10 @@ impl<'r, 'b> Runner<'r, 'b> {
                     self.session.run_for(PER_KEY).map_err(io)?;
                 }
             }
-            Action::Key(chord) => {
+            Action::Key { chord, .. } => {
                 self.need_window("key")?;
                 let press = keys::chord(chord)?;
+                self.session.mark_key(chord);
                 self.press(&press).map_err(io)?;
                 self.session.run_for(PER_KEY).map_err(io)?;
             }
@@ -242,34 +296,33 @@ impl<'r, 'b> Runner<'r, 'b> {
                 command,
                 shown,
                 exit,
+                wait,
             } => {
+                if let Some(running) = &self.running {
+                    return Err(format!("`{}` is still running", running.command));
+                }
                 // What a command causes is usually elsewhere on screen.
                 let moved = self.session.camera.overview();
                 self.settle_camera(moved).map_err(io)?;
                 self.type_command(shown.as_deref().unwrap_or(command))?;
                 let terminal = self.terminal()?;
                 terminal.run(command).map_err(io)?;
-                let timeout = step.timeout.unwrap_or(RUN_TIMEOUT);
-                let start = Instant::now();
-                let status = loop {
-                    if let Some(status) = self.terminal()?.finished().map_err(io)? {
-                        break status;
-                    }
-                    if start.elapsed() > timeout {
-                        return Err(format!(
-                            "`{command}` was still running after {timeout:?}; the terminal shows:\n{}",
-                            tail(&self.terminal()?.contents())
-                        ));
-                    }
+                self.running = Some(Running {
+                    command: command.clone(),
+                    exit: *exit,
+                    status: None,
+                });
+                if *wait {
+                    self.wait_exit(step.timeout.unwrap_or(RUN_TIMEOUT))?;
+                } else {
                     self.session.tick().map_err(io)?;
-                };
-                self.terminal()?.prompt();
-                if status != *exit {
-                    return Err(format!(
-                        "`{command}` exited with {status}, expected {exit}; the terminal shows:\n{}",
-                        tail(&self.terminal()?.contents())
-                    ));
                 }
+            }
+            Action::WaitExit(_) => {
+                if self.running.is_none() {
+                    return Err("no command is running".into());
+                }
+                self.wait_exit(step.timeout.unwrap_or(RUN_TIMEOUT))?;
             }
             Action::Playback { shown, output } => {
                 let text = std::fs::read_to_string(self.session.story_dir().join(output))
@@ -385,6 +438,61 @@ impl<'r, 'b> Runner<'r, 'b> {
         Ok(())
     }
 
+    /// Wait for the running command to finish, then show the prompt and
+    /// check its status.
+    fn wait_exit(&mut self, timeout: Duration) -> Result<(), String> {
+        let io = |e: io::Error| e.to_string();
+        let start = Instant::now();
+        let status = loop {
+            if let Some(status) = self.poll_running()? {
+                break status;
+            }
+            if start.elapsed() > timeout {
+                let command = self.running.as_ref().unwrap().command.clone();
+                return Err(format!(
+                    "`{command}` was still running after {timeout:?}; the terminal shows:\n{}",
+                    tail(&self.terminal()?.contents())
+                ));
+            }
+            self.session.tick().map_err(io)?;
+        };
+        let Running { command, exit, .. } = self.running.take().unwrap();
+        self.terminal()?.prompt();
+        if status != exit {
+            return Err(format!(
+                "`{command}` exited with {status}, expected {exit}; the terminal shows:\n{}",
+                tail(&self.terminal()?.contents())
+            ));
+        }
+        Ok(())
+    }
+
+    /// The running command's status, once it has finished.
+    fn poll_running(&mut self) -> Result<Option<i32>, String> {
+        if let Some(status) = self.running.as_ref().and_then(|r| r.status) {
+            return Ok(Some(status));
+        }
+        let status = self.terminal()?.finished().map_err(|e| e.to_string())?;
+        if let Some(running) = &mut self.running {
+            running.status = status;
+        }
+        Ok(status)
+    }
+
+    /// Keys sent to the terminal need a program there to read them.
+    fn terminal_input(&mut self) -> Result<(), String> {
+        let Some(command) = self.running.as_ref().map(|r| r.command.clone()) else {
+            return Err("nothing is running in the terminal to read the keys".into());
+        };
+        if let Some(status) = self.poll_running()? {
+            return Err(format!(
+                "`{command}` already exited with {status}, so nothing is reading the keys"
+            ));
+        }
+        let moved = self.session.camera.overview();
+        self.settle_camera(moved).map_err(|e| e.to_string())
+    }
+
     /// Keys go to the focused window; fail clearly when there is none.
     fn need_window(&self, step: &str) -> Result<(), String> {
         if self.session.compositor.windows().is_empty() {
@@ -451,6 +559,7 @@ impl<'r, 'b> Runner<'r, 'b> {
     }
 
     fn click(&mut self) -> io::Result<()> {
+        self.session.mark_click();
         let now = self.session.now();
         self.session
             .compositor
@@ -818,11 +927,16 @@ fn not_found(target: &Target, trees: &[(App, Vec<Node>)], named: &[(usize, usize
             .iter()
             .flat_map(|(_, nodes)| nodes.iter())
             .filter(|n| n.depth > 0 && !n.name.is_empty() && seen.insert(n.name.clone()))
-            .take(20)
             .map(|n| format!("\"{}\"", n.name))
             .collect();
         if names.is_empty() {
             out.push_str("; no app has published an accessibility tree");
+        } else if names.len() > 20 {
+            out.push_str(&format!(
+                "; showing names include {}, and {} more; `matinee probe` lists them all",
+                names[..20].join(", "),
+                names.len() - 20
+            ));
         } else {
             out.push_str(&format!("; showing names include {}", names.join(", ")));
         }
@@ -862,6 +976,47 @@ mod tests {
         assert!(same_role("text box", "entry"));
         assert!(!same_role("toggle button", "button"));
         assert!(!same_role("label", "button"));
+    }
+
+    #[test]
+    fn a_long_list_of_names_points_at_probe() {
+        let app = App {
+            bus: ":1.1".into(),
+            path: zbus::zvariant::OwnedObjectPath::try_from("/app").unwrap(),
+            name: "app".into(),
+            pid: 1,
+        };
+        let node = |name: String| Node {
+            name,
+            role: "label".into(),
+            depth: 1,
+            parent: Some(0),
+            window: "Window".into(),
+            extents: None,
+            showing: true,
+            focused: false,
+            text: None,
+            value: None,
+        };
+        let target = Target {
+            name: "Missing".into(),
+            role: None,
+            within: None,
+            near: None,
+            window: None,
+            app: None,
+        };
+        let few: Vec<Node> = (0..20).map(|i| node(format!("item {i}"))).collect();
+        let text = not_found(&target, &[(app.clone(), few)], &[]);
+        assert!(text.ends_with("\"item 19\""), "{text}");
+
+        let many: Vec<Node> = (0..25).map(|i| node(format!("item {i}"))).collect();
+        let text = not_found(&target, &[(app, many)], &[]);
+        assert!(!text.contains("item 20"), "{text}");
+        assert!(
+            text.contains("and 5 more; `matinee probe` lists them all"),
+            "{text}"
+        );
     }
 
     #[test]

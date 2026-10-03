@@ -8,9 +8,8 @@ license = "MIT"
 publish = false
 
 [dependencies]
-color_quant = "1"
 fontdue = "0.9"
-gif = "0.14"
+gif = { version = "0.14", default-features = false, features = ["raii_no_panic", "std"] }
 libc = "0.2"
 png = "0.18"
 serde = { version = "1", features = ["derive"] }

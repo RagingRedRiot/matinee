@@ -80,6 +80,9 @@ pub struct Demo {
     pub scale: u32,
     pub fps: u32,
     pub themes: Vec<Theme>,
+    /// How far, in any channel, lossy GIF compression may move a color;
+    /// 0 is exact.
+    pub lossy: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
@@ -124,6 +127,9 @@ pub struct Camera {
     pub mode: CameraMode,
     pub max_zoom: f64,
     pub ease: Duration,
+    /// How wide, in pixels, the recording is expected to be shown. Auto
+    /// framing zooms until text reads at that width.
+    pub reading_width: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -158,7 +164,14 @@ pub enum Action {
         command: String,
         shown: Option<String>,
         exit: i32,
+        /// Whether the step waits for the command to finish. A command
+        /// that does not is left running for `type` and `key` steps, and
+        /// its status is checked by a later `wait_exit`, or at the end.
+        wait: bool,
     },
+    /// Wait for the command still running in the terminal, named as its
+    /// `run` or `terminal` text, and check its exit status.
+    WaitExit(String),
     /// Display a command and play back canned output; nothing runs.
     /// `output` is relative to the storyboard's folder.
     Playback {
@@ -187,9 +200,18 @@ pub enum Action {
         from: Spot,
         to: Spot,
     },
-    Type(String),
-    /// A key chord such as `ctrl+k` or `enter`.
-    Key(String),
+    /// Type text into the focused window, or into the program running in
+    /// the terminal.
+    Type {
+        text: String,
+        terminal: bool,
+    },
+    /// A key chord such as `ctrl+k` or `enter`, pressed in the focused
+    /// window or in the terminal.
+    Key {
+        chord: String,
+        terminal: bool,
+    },
     Camera(CameraMove),
     /// Only a hold.
     Pause,
@@ -330,6 +352,7 @@ struct RawDemo {
     scale: Option<u32>,
     fps: Option<u32>,
     themes: Option<Vec<Theme>>,
+    lossy: Option<u8>,
 }
 
 #[derive(Deserialize)]
@@ -360,6 +383,7 @@ struct RawCamera {
     mode: Option<CameraMode>,
     max_zoom: Option<f64>,
     ease: Option<String>,
+    reading_width: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -385,6 +409,8 @@ struct RawStep {
     terminal: Option<String>,
     output: Option<PathBuf>,
     exit: Option<i32>,
+    wait: Option<bool>,
+    wait_exit: Option<String>,
     wait_for: Option<String>,
     expect: Option<String>,
     hover: Option<String>,
@@ -459,12 +485,17 @@ impl RawStory {
         if themes.iter().collect::<BTreeSet<_>>().len() != themes.len() {
             return Err("demo.themes lists a theme twice".into());
         }
+        let lossy = d.lossy.unwrap_or(crate::record::LOSSY);
+        if lossy > 32 {
+            return Err("demo.lossy must be from 0 (exact) to 32".into());
+        }
         let demo = Demo {
             output: d.output,
             size: d.size,
             scale,
             fps,
             themes,
+            lossy,
         };
 
         let seeds = self
@@ -513,14 +544,20 @@ impl RawStory {
             mode: None,
             max_zoom: None,
             ease: None,
+            reading_width: None,
         });
         let max_zoom = c.max_zoom.unwrap_or(2.2);
         if !(1.0..=8.0).contains(&max_zoom) {
             return Err("camera.max_zoom must be from 1 to 8".into());
         }
+        let reading_width = c.reading_width.unwrap_or(crate::camera::READING_WIDTH);
+        if !(200..=4000).contains(&reading_width) {
+            return Err("camera.reading_width must be from 200 to 4000 pixels".into());
+        }
         let camera = Camera {
             mode: c.mode.unwrap_or(CameraMode::Auto),
             max_zoom,
+            reading_width,
             ease: duration("camera.ease", c.ease)?.unwrap_or(Duration::from_millis(400)),
         };
 
@@ -544,6 +581,7 @@ impl RawStory {
                 steps,
             });
         }
+        check_running(&scenes)?;
 
         let session = Session {
             mounts: self
@@ -595,6 +633,70 @@ impl RawStory {
     }
 }
 
+/// Check the order of terminal steps: one command runs at a time, keys sent
+/// to the terminal need a program running there to read them, and
+/// `wait_exit` names the command that is running.
+fn check_running(scenes: &[Scene]) -> Result<(), String> {
+    let mut running: Option<(&str, Option<&str>)> = None;
+    for (si, scene) in scenes.iter().enumerate() {
+        for (ti, step) in scene.steps.iter().enumerate() {
+            let at = |e: String| format!("scene {}, step {}: {e}", si + 1, ti + 1);
+            let busy = |what: &str, (command, _): (&str, Option<&str>)| {
+                at(format!(
+                    "{what} while `{command}` is still running; add a `wait_exit` step first"
+                ))
+            };
+            match &step.action {
+                Action::Run {
+                    command,
+                    shown,
+                    wait,
+                    ..
+                } => {
+                    if let Some(r) = running {
+                        return Err(busy("this runs a command", r));
+                    }
+                    if !wait {
+                        running = Some((command, shown.as_deref()));
+                    }
+                }
+                Action::Playback { .. } => {
+                    if let Some(r) = running {
+                        return Err(busy("this plays back output", r));
+                    }
+                }
+                Action::WaitExit(name) => match running {
+                    Some((command, shown)) if name == command || Some(name.as_str()) == shown => {
+                        running = None;
+                    }
+                    Some((command, _)) => {
+                        return Err(at(format!(
+                            "`wait_exit = \"{name}\"` names no running command; `{command}` is running"
+                        )));
+                    }
+                    None => {
+                        return Err(at(format!(
+                            "`wait_exit = \"{name}\"`, but no command is running; \
+                             start one with `run` and `wait = false`"
+                        )));
+                    }
+                },
+                Action::Type { terminal: true, .. } | Action::Key { terminal: true, .. }
+                    if running.is_none() =>
+                {
+                    return Err(at(
+                        "this sends keys to the terminal, but nothing is running there to \
+                         read them; start a program with `run` and `wait = false`"
+                            .into(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
 impl RawStep {
     fn check(mut self, launches: &[Launch], dir: &Path, max_zoom: f64) -> Result<Step, String> {
         let hold = duration("hold", self.hold.take())?;
@@ -603,6 +705,7 @@ impl RawStep {
         let actions: Vec<&str> = [
             ("run", self.run.is_some()),
             ("terminal", self.terminal.is_some() && self.run.is_none()),
+            ("wait_exit", self.wait_exit.is_some()),
             ("wait_for", self.wait_for.is_some()),
             ("expect", self.expect.is_some()),
             ("hover", self.hover.is_some()),
@@ -635,6 +738,12 @@ impl RawStep {
             Ok(())
         };
         only_with("exit", self.exit.is_some(), &["run"])?;
+        only_with("wait", self.wait.is_some(), &["run"])?;
+        if self.wait == Some(false) && timeout.is_some() {
+            return Err(
+                "a `run` that does not wait has no timeout; put it on the `wait_exit` step".into(),
+            );
+        }
         only_with("output", self.output.is_some(), &["terminal", "run"])?;
         only_with("to", self.to.is_some(), &["drag", "drag_slider"])?;
         only_with("to_role", self.to_role.is_some(), &["drag"])?;
@@ -656,8 +765,26 @@ impl RawStep {
             ("window", self.window.is_some()),
             ("in", self.app.is_some()),
         ];
+        // Keys go to the terminal with `in = "terminal"`, or when there is
+        // no app window to go to.
+        let keys = matches!(action, Some("type" | "key"));
+        if keys {
+            if let Some(app) = &self.app {
+                if app != "terminal" {
+                    return Err(format!(
+                        "`in = \"{app}\"` on a `{}` step: keys go to the focused window, \
+                         or to the terminal with `in = \"terminal\"`",
+                        action.unwrap()
+                    ));
+                }
+            }
+        }
+        let to_terminal = keys && (self.app.take().is_some() || launches.is_empty());
         for (key, set) in context {
             if key == "window" && action.is_some_and(|a| at.contains(&a)) {
+                continue;
+            }
+            if key == "in" && keys {
                 continue;
             }
             only_with(key, set, &targeted)?;
@@ -715,8 +842,10 @@ impl RawStep {
                     command: self.run.take().unwrap(),
                     shown,
                     exit: self.exit.unwrap_or(0),
+                    wait: self.wait.unwrap_or(true),
                 }
             }
+            Some("wait_exit") => Action::WaitExit(self.wait_exit.take().unwrap()),
             Some("terminal") => {
                 let shown = self.terminal.take().unwrap();
                 let Some(output) = self.output.take() else {
@@ -800,8 +929,20 @@ impl RawStep {
                     },
                 }
             }
-            Some("type") => Action::Type(self.type_text.take().unwrap()),
-            Some("key") => Action::Key(self.key.take().unwrap()),
+            Some("type") => Action::Type {
+                text: self.type_text.take().unwrap(),
+                terminal: to_terminal,
+            },
+            Some("key") => {
+                let chord = self.key.take().unwrap();
+                if to_terminal {
+                    crate::keys::terminal_bytes(&chord, false)?;
+                }
+                Action::Key {
+                    chord,
+                    terminal: to_terminal,
+                }
+            }
             Some("camera") => match self.camera.take().unwrap() {
                 RawCameraMove::Named(n) if n == "overview" => Action::Camera(CameraMove::Overview),
                 RawCameraMove::Named(n) => {

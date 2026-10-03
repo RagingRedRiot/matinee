@@ -1,11 +1,12 @@
 use matinee::{a11y::A11y, boundary::Boundary, runner::Runner, session::Session, story::Story};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use std::{path::PathBuf, process::ExitCode};
 
 const USAGE: &str = "\
 usage: matinee check <storyboard.toml>...
        matinee run <storyboard.toml>
-       matinee record <storyboard.toml>
+       matinee record [<storyboard.toml or folder>...]
        matinee shell <storyboard.toml> [-- <command>...]
        matinee snapshot <storyboard.toml> <out.png> [-- <command>...]
        matinee probe <storyboard.toml> [--all] [-- <command>...]
@@ -15,20 +16,55 @@ commands:
   run     perform a storyboard against the real apps and check every step,
           without recording
   record  perform it once per theme and write a GIF of each, named after
-          demo.output with -light or -dark added
+          demo.output with -light or -dark added; with folders, or none for
+          the current folder, record every storyboard found in them
   shell   run a command, or bash, inside the isolated session a storyboard
           gets: its project at /project, a throwaway home, and no network
   snapshot  start the storyboard's apps, or a command, in that session and
           save a picture of the screen once it settles
   probe   start them the same way and list what steps can target: each
-          window, and the name and role of everything showing in it";
+          window, and the name and role of everything showing in it
+
+options:
+  --no-isolation  run, record, shell, snapshot, and probe on the host instead
+          of in namespaces, for systems that do not allow unprivileged user
+          namespaces; commands and apps still get a fresh home, environment,
+          display, and buses, but can read your files and use the network";
+
+/// Set by `--no-isolation`: run stories on the host, without namespaces.
+static NO_ISOLATION: AtomicBool = AtomicBool::new(false);
+
+/// The boundary a command runs `story` in, isolated unless asked not to be.
+fn boundary_for(story: &Story, work: &std::path::Path) -> std::io::Result<Boundary> {
+    let boundary = Boundary::for_story(story, work)?;
+    if NO_ISOLATION.load(Ordering::Relaxed) {
+        boundary.without_isolation()
+    } else {
+        Ok(boundary)
+    }
+}
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // `--no-isolation` may come anywhere before a `--` that starts a
+    // command.
+    let end = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    if let Some(at) = args[..end].iter().position(|a| a == "--no-isolation") {
+        args.remove(at);
+        if args.first().is_some_and(|c| c == "check") {
+            eprintln!("matinee: check runs nothing, so --no-isolation does not apply");
+            return ExitCode::from(2);
+        }
+        NO_ISOLATION.store(true, Ordering::Relaxed);
+        eprintln!(
+            "matinee: running without isolation: commands and apps get a fresh home and \
+             environment, but can read your files and use the network"
+        );
+    }
     match args.first().map(String::as_str) {
         Some("check") if args.len() > 1 => check(args[1..].iter().map(PathBuf::from)),
         Some("run") if args.len() == 2 => run(&args[1]),
-        Some("record") if args.len() == 2 => record(&args[1]),
+        Some("record") => record(&args[1..]),
         Some("shell") if args.len() == 2 => shell(&args[1], &[]),
         Some("shell") if args.len() > 3 && args[2] == "--" => shell(&args[1], &args[3..]),
         Some("probe") if args.len() >= 2 => {
@@ -102,7 +138,7 @@ fn shell(path: &str, command: &[String]) -> ExitCode {
         eprintln!("matinee: {}: {e}", work.display());
         return ExitCode::FAILURE;
     }
-    let result = Boundary::for_story(&story, &work).and_then(|session| {
+    let result = boundary_for(&story, &work).and_then(|session| {
         session.run(|| {
             let (program, args) = match command.split_first() {
                 Some((program, args)) => (program.as_str(), args),
@@ -149,7 +185,7 @@ fn snapshot(path: &str, out: &str, command: &[String]) -> ExitCode {
     let mut written = vec![];
     let mut failure = None;
     for &theme in &story.demo.themes {
-        let result = Boundary::for_story(&story, &work).and_then(|boundary| {
+        let result = boundary_for(&story, &work).and_then(|boundary| {
             boundary.run(|| {
                 let shot = Session::start(&boundary, &story, theme).and_then(|mut session| {
                     session.seed(&story)?;
@@ -158,7 +194,7 @@ fn snapshot(path: &str, out: &str, command: &[String]) -> ExitCode {
                         None => session.launch(&story)?,
                     }
                     let frame = session.settle(Duration::from_secs(1), Duration::from_secs(8))?;
-                    frame.write_png(&std::path::Path::new(matinee::boundary::WORK).join("shot.png"))
+                    frame.write_png(&boundary.work().join("shot.png"))
                 });
                 match shot {
                     Ok(()) => 0,
@@ -228,7 +264,7 @@ fn probe(path: &str, all: bool, command: &[String]) -> ExitCode {
         eprintln!("matinee: {}: {e}", work.display());
         return ExitCode::FAILURE;
     }
-    let result = Boundary::for_story(&story, &work).and_then(|boundary| {
+    let result = boundary_for(&story, &work).and_then(|boundary| {
         boundary.run(|| {
             let listed =
                 Session::start(&boundary, &story, story.demo.themes[0]).and_then(|mut session| {
@@ -328,7 +364,7 @@ fn run(path: &str) -> ExitCode {
     }
     // The story is the same in every theme, so one is enough to check it.
     let theme = story.demo.themes[0];
-    let result = Boundary::for_story(&story, &work).and_then(|boundary| {
+    let result = boundary_for(&story, &work).and_then(|boundary| {
         boundary.run(|| {
             let performed = Session::start(&boundary, &story, theme)
                 .map_err(matinee::runner::Failure::from)
@@ -364,39 +400,137 @@ fn run(path: &str) -> ExitCode {
 const LEAD_IN: Duration = Duration::from_millis(500);
 const TAIL: Duration = Duration::from_millis(1500);
 
-fn record(path: &str) -> ExitCode {
-    let story = match Story::load(path.as_ref()) {
-        Ok(story) => story,
-        Err(e) => {
-            eprintln!("{e}");
+/// Record every storyboard in `targets`, files or folders to search, or
+/// in the current folder when there are none.
+fn record(targets: &[String]) -> ExitCode {
+    let roots: Vec<PathBuf> = if targets.is_empty() {
+        vec![PathBuf::from(".")]
+    } else {
+        targets.iter().map(PathBuf::from).collect()
+    };
+    let mut paths = vec![];
+    for root in &roots {
+        match matinee::discover::storyboards(root) {
+            Ok(found) if found.is_empty() => {
+                eprintln!("matinee: no storyboards in {}", root.display());
+                return ExitCode::FAILURE;
+            }
+            Ok(found) => paths.extend(found),
+            Err(e) => {
+                eprintln!("matinee: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    paths.sort();
+    paths.dedup();
+
+    // Read them all first, so a mistake, or two demos writing the same
+    // GIF, stops everything before anything is recorded.
+    let mut stories = vec![];
+    let mut mistaken = false;
+    for path in &paths {
+        match Story::load(path) {
+            Ok(story) => stories.push(story),
+            Err(e) => {
+                eprintln!("{e}");
+                mistaken = true;
+            }
+        }
+    }
+    if mistaken {
+        return ExitCode::FAILURE;
+    }
+    let mut outputs: Vec<(PathBuf, &PathBuf)> = vec![];
+    for (story, path) in stories.iter().zip(&paths) {
+        let output = normalize(&story.dir.join(&story.demo.output));
+        if let Some((_, other)) = outputs.iter().find(|(o, _)| *o == output) {
+            eprintln!(
+                "matinee: {} and {} both write {}-*.gif; give one a different demo.output",
+                other.display(),
+                path.display(),
+                output.display()
+            );
             return ExitCode::FAILURE;
         }
-    };
+        outputs.push((output, path));
+    }
+
+    if let ([path], [story]) = (&paths[..], &stories[..]) {
+        return if record_story(path, story) {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        };
+    }
+    let mut failed = vec![];
+    for (path, story) in paths.iter().zip(&stories) {
+        println!("== {}", path.display());
+        if !record_story(path, story) {
+            failed.push(path);
+        }
+    }
+    println!(
+        "recorded {} of {} demos",
+        paths.len() - failed.len(),
+        paths.len()
+    );
+    if failed.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        for path in failed {
+            eprintln!("matinee: failed: {}", path.display());
+        }
+        ExitCode::FAILURE
+    }
+}
+
+/// `path` with `.` and `..` worked out, without touching the filesystem,
+/// so two spellings of one output compare equal.
+fn normalize(path: &std::path::Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir if out.file_name().is_some() => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Record one storyboard in each of its themes, and say whether every
+/// theme was written.
+fn record_story(path: &std::path::Path, story: &Story) -> bool {
+    let path = path.display();
     let work = std::env::temp_dir().join(format!("matinee-{}", std::process::id()));
     if let Err(e) = std::fs::create_dir(&work) {
         eprintln!("matinee: {}: {e}", work.display());
-        return ExitCode::FAILURE;
+        return false;
     }
     let mut failed = false;
     for &theme in &story.demo.themes {
-        let result = Boundary::for_story(&story, &work).and_then(|boundary| {
+        let result = boundary_for(story, &work).and_then(|boundary| {
             boundary.run(|| {
-                let recorded = Session::start(&boundary, &story, theme)
+                let recorded = Session::start(&boundary, story, theme)
                     .map_err(matinee::runner::Failure::from)
                     .and_then(|mut session| {
-                        let mut runner = Runner::new(&mut session, &story)?;
-                        runner.launch(&story)?;
+                        let mut runner = Runner::new(&mut session, story)?;
+                        runner.launch(story)?;
                         drop(runner);
                         session.start_recording();
                         session.run_for(LEAD_IN)?;
-                        let mut runner = Runner::new(&mut session, &story)?;
-                        let steps = runner.perform(&story)?;
+                        let mut runner = Runner::new(&mut session, story)?;
+                        let steps = runner.perform(story)?;
                         drop(runner);
                         // End on the whole screen, where the loop restarts.
+                        session.mark_segment("end");
                         session.camera.overview();
                         session.run_for(TAIL)?;
                         let recording = session.stop_recording().expect("recording was started");
-                        let gif = std::path::Path::new(matinee::boundary::WORK).join("out.gif");
+                        let gif = boundary.work().join("out.gif");
                         let written = recording.write_gif(&gif, story.demo.fps)?;
                         Ok((steps, written))
                     });
@@ -409,6 +543,19 @@ fn record(path: &str) -> ExitCode {
                             written.seconds,
                             written.bytes / 1024
                         );
+                        for part in &written.segments {
+                            let camera = if part.camera_bytes > 0 {
+                                format!(", {} KB while the camera moved", part.camera_bytes / 1024)
+                            } else {
+                                String::new()
+                            };
+                            println!(
+                                "  {:>5.1} s {:>6} KB  {}{camera}",
+                                part.seconds,
+                                part.bytes / 1024,
+                                part.label
+                            );
+                        }
                         let budget = if written.camera_moved {
                             matinee::record::CAMERA_BUDGET
                         } else {
@@ -460,9 +607,5 @@ fn record(path: &str) -> ExitCode {
         }
     }
     let _ = std::fs::remove_dir_all(&work);
-    if failed {
-        ExitCode::FAILURE
-    } else {
-        ExitCode::SUCCESS
-    }
+    !failed
 }

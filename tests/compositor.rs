@@ -8,10 +8,11 @@ use std::{
     time::{Duration, Instant},
 };
 use wayland_client::{
-    Connection, Dispatch, QueueHandle, delegate_noop,
+    Connection, Dispatch, Proxy, QueueHandle, delegate_noop,
     globals::{GlobalListContents, registry_queue_init},
     protocol::{
-        wl_buffer, wl_callback, wl_compositor, wl_keyboard, wl_registry, wl_seat, wl_shm,
+        wl_buffer, wl_callback, wl_compositor, wl_data_device, wl_data_device_manager,
+        wl_data_offer, wl_data_source, wl_keyboard, wl_pointer, wl_registry, wl_seat, wl_shm,
         wl_shm_pool, wl_surface,
     },
 };
@@ -23,6 +24,9 @@ const OWN_SIZE: (i32, i32) = (120, 90);
 const SIZE: (u32, u32) = (400, 300);
 const BLUE: u32 = 0xff3366cc;
 const ORANGE: u32 = 0xffee8833;
+const GREEN: u32 = 0xff33aa55;
+/// A drag icon's logical size.
+const ICON: i32 = 20;
 
 /// What the client asks of its windows.
 struct Spec {
@@ -30,6 +34,9 @@ struct Spec {
     color: u32,
     /// A dialog of this logical size, parented to the first window.
     dialog: Option<(i32, i32)>,
+    /// Pressing in this window starts a drag whose icon has its hotspot
+    /// this many points in from the icon's top-left corner.
+    drag_icon: Option<(i32, i32)>,
 }
 
 /// What the client reports back.
@@ -43,6 +50,9 @@ enum Report {
 
 struct Client {
     shm: wl_shm::WlShm,
+    compositor: wl_compositor::WlCompositor,
+    data: wl_data_device_manager::WlDataDeviceManager,
+    device: wl_data_device::WlDataDevice,
     surfaces: Vec<Probe>,
     reports: mpsc::Sender<Report>,
 }
@@ -67,8 +77,13 @@ fn run_client(
     let wm: xdg_wm_base::XdgWmBase = globals.bind(&qh, 1..=6, ()).unwrap();
     let seat: wl_seat::WlSeat = globals.bind(&qh, 1..=9, ()).unwrap();
     seat.get_keyboard(&qh, ());
+    seat.get_pointer(&qh, ());
+    let data: wl_data_device_manager::WlDataDeviceManager = globals.bind(&qh, 1..=3, ()).unwrap();
     let mut client = Client {
         shm: globals.bind(&qh, 1..=1, ()).unwrap(),
+        device: data.get_data_device(&seat, &qh, ()),
+        data,
+        compositor: compositor.clone(),
         surfaces: vec![],
         reports,
     };
@@ -114,21 +129,61 @@ impl Client {
     /// Draw window `index` in its color at its current size.
     fn draw(&mut self, index: usize, qh: &QueueHandle<Client>) {
         let probe = &self.surfaces[index];
+        let buffer = self.buffer(probe.size, probe.spec.color, qh);
+        let probe = &self.surfaces[index];
         let (w, h) = (probe.size.0 * SCALE as i32, probe.size.1 * SCALE as i32);
+        probe.surface.attach(Some(&buffer), 0, 0);
+        probe.surface.damage_buffer(0, 0, w, h);
+        probe.surface.frame(qh, ());
+        probe.surface.commit();
+    }
+
+    /// A buffer of one color, `size` points at the test's scale.
+    fn buffer(
+        &self,
+        size: (i32, i32),
+        color: u32,
+        qh: &QueueHandle<Client>,
+    ) -> wl_buffer::WlBuffer {
+        let (w, h) = (size.0 * SCALE as i32, size.1 * SCALE as i32);
         let stride = w * 4;
         let len = (stride * h) as usize;
         let file = tempfile();
-        let pixels: Vec<u8> = std::iter::repeat_n(probe.spec.color.to_le_bytes(), (w * h) as usize)
+        let pixels: Vec<u8> = std::iter::repeat_n(color.to_le_bytes(), (w * h) as usize)
             .flatten()
             .collect();
         std::io::Write::write_all(&mut &file, &pixels).unwrap();
         let pool = self.shm.create_pool(file.as_fd(), len as i32, qh, ());
         let buffer = pool.create_buffer(0, w, h, stride, wl_shm::Format::Argb8888, qh, ());
         pool.destroy();
-        probe.surface.attach(Some(&buffer), 0, 0);
-        probe.surface.damage_buffer(0, 0, w, h);
-        probe.surface.frame(qh, ());
-        probe.surface.commit();
+        buffer
+    }
+
+    /// Start dragging from the first window with a drag icon, the way
+    /// GTK does: the icon's buffer is offset by minus its hotspot.
+    fn start_drag(&mut self, serial: u32, qh: &QueueHandle<Client>) {
+        let Some(probe) = self.surfaces.first() else {
+            return;
+        };
+        let Some((hx, hy)) = probe.spec.drag_icon else {
+            return;
+        };
+        let origin = probe.surface.clone();
+        let source = self.data.create_data_source(qh, ());
+        source.offer("text/plain".into());
+        let icon = self.compositor.create_surface(qh, ());
+        self.device
+            .start_drag(Some(&source), &origin, Some(&icon), serial);
+        icon.set_buffer_scale(SCALE as i32);
+        let buffer = self.buffer((ICON, ICON), GREEN, qh);
+        if icon.version() >= 5 {
+            icon.attach(Some(&buffer), 0, 0);
+            icon.offset(-hx, -hy);
+        } else {
+            icon.attach(Some(&buffer), -hx, -hy);
+        }
+        icon.damage_buffer(0, 0, ICON * SCALE as i32, ICON * SCALE as i32);
+        icon.commit();
     }
 }
 
@@ -276,7 +331,46 @@ impl Dispatch<wl_shm::WlShm, ()> for Client {
     }
 }
 
+impl Dispatch<wl_pointer::WlPointer, ()> for Client {
+    fn event(
+        client: &mut Self,
+        _: &wl_pointer::WlPointer,
+        event: wl_pointer::Event,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let wl_pointer::Event::Button {
+            serial,
+            state: wayland_client::WEnum::Value(wl_pointer::ButtonState::Pressed),
+            ..
+        } = event
+        {
+            client.start_drag(serial, qh);
+        }
+    }
+}
+
+impl Dispatch<wl_data_device::WlDataDevice, ()> for Client {
+    fn event(
+        _: &mut Self,
+        _: &wl_data_device::WlDataDevice,
+        _: wl_data_device::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+
+    wayland_client::event_created_child!(Client, wl_data_device::WlDataDevice, [
+        wl_data_device::EVT_DATA_OFFER_OPCODE => (wl_data_offer::WlDataOffer, ()),
+    ]);
+}
+
 delegate_noop!(Client: ignore wl_compositor::WlCompositor);
+delegate_noop!(Client: ignore wl_data_device_manager::WlDataDeviceManager);
+delegate_noop!(Client: ignore wl_data_source::WlDataSource);
+delegate_noop!(Client: ignore wl_data_offer::WlDataOffer);
 delegate_noop!(Client: ignore wl_surface::WlSurface);
 delegate_noop!(Client: ignore wl_shm_pool::WlShmPool);
 delegate_noop!(Client: ignore wl_buffer::WlBuffer);
@@ -359,6 +453,7 @@ fn a_window_fills_the_output_and_renders() {
             title: "Probe",
             color: BLUE,
             dialog: None,
+            drag_icon: None,
         }],
     );
     h.until("the window", mapped(&["Probe"]));
@@ -388,6 +483,7 @@ fn frame_callbacks_carry_the_recording_time() {
             title: "Probe",
             color: BLUE,
             dialog: None,
+            drag_icon: None,
         }],
     );
     h.until("the window", mapped(&["Probe"]));
@@ -413,11 +509,13 @@ fn a_dialog_is_centered_at_its_own_size_and_takes_focus() {
                 title: "Main",
                 color: BLUE,
                 dialog: None,
+                drag_icon: None,
             },
             Spec {
                 title: "Dialog",
                 color: ORANGE,
                 dialog: Some((200, 100)),
+                drag_icon: None,
             },
         ],
     );
@@ -470,6 +568,7 @@ fn window_area_leaves_room_for_a_terminal() {
             title: "Probe",
             color: BLUE,
             dialog: None,
+            drag_icon: None,
         }],
     );
     h.compositor.set_window_area(0, 0, 400, 200);
@@ -489,4 +588,47 @@ fn window_area_leaves_room_for_a_terminal() {
             "window never filled only the area"
         );
     }
+}
+
+#[test]
+fn a_drag_icon_sits_at_its_hotspot() {
+    let mut h = Harness::start(
+        "dragicon",
+        vec![Spec {
+            title: "Probe",
+            color: BLUE,
+            dialog: None,
+            drag_icon: Some((12, 8)),
+        }],
+    );
+    h.until("the window at full size", |c| {
+        c.windows()
+            .iter()
+            .any(|w| w.rect.size == (SIZE.0 as i32, SIZE.1 as i32).into())
+    });
+    h.compositor.dispatch(Duration::from_millis(50)).unwrap();
+    h.compositor.pointer_move(100.0, 100.0, Duration::ZERO);
+    h.compositor
+        .pointer_button(BUTTON_LEFT, true, Duration::ZERO);
+    // The icon's top-left corner is 12 points left of and 8 above the
+    // pointer, so it covers 88..108 by 92..112, in device pixels twice that.
+    let start = Instant::now();
+    let frame = loop {
+        h.compositor.dispatch(Duration::from_millis(10)).unwrap();
+        let frame = h.compositor.render(Duration::ZERO).unwrap();
+        if frame.pixel(2 * 100, 2 * 100) == GREEN {
+            break frame;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "no drag icon under the pointer"
+        );
+    };
+    assert_eq!(frame.pixel(2 * 89, 2 * 93), GREEN, "top-left of the icon");
+    assert_eq!(
+        frame.pixel(2 * 107, 2 * 111),
+        GREEN,
+        "bottom-right of the icon"
+    );
+    assert_eq!(frame.pixel(2 * 110, 2 * 114), BLUE, "past the icon");
 }

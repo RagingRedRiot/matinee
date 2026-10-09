@@ -97,6 +97,7 @@ pub struct Runner<'r, 'b> {
     pointer: (f64, f64),
     /// A command left running in the terminal.
     running: Option<Running>,
+    step_at: (usize, usize),
 }
 
 /// A command a `run` step started without waiting for it.
@@ -116,6 +117,7 @@ impl<'r, 'b> Runner<'r, 'b> {
             a11y,
             pointer: (w as f64 / 2.0, h as f64 / 2.0),
             running: None,
+            step_at: (0, 0),
         })
     }
 
@@ -185,6 +187,7 @@ impl<'r, 'b> Runner<'r, 'b> {
             self.session.mark_segment(&label);
             self.session.caption(scene.caption.as_deref());
             for (ti, step) in scene.steps.iter().enumerate() {
+                self.step_at = (si + 1, ti + 1);
                 self.step(step).map_err(|message| Failure {
                     at: format!("scene {}, step {}", si + 1, ti + 1),
                     message,
@@ -205,11 +208,19 @@ impl<'r, 'b> Runner<'r, 'b> {
     fn step(&mut self, step: &Step) -> Result<(), String> {
         let io = |e: io::Error| e.to_string();
         match &step.action {
-            Action::WaitFor(target) => {
-                self.wait_until(target, step.timeout.unwrap_or(WAIT_TIMEOUT), true)?;
-            }
-            Action::Expect(target) => {
-                self.wait_until(target, step.timeout.unwrap_or(EXPECT_TIMEOUT), true)?;
+            Action::WaitFor(target) | Action::Expect(target) => {
+                let timeout = if matches!(&step.action, Action::WaitFor(_)) {
+                    WAIT_TIMEOUT
+                } else {
+                    EXPECT_TIMEOUT
+                };
+                self.wait_until(target, step.timeout.unwrap_or(timeout), true)?;
+                self.session
+                    .save_artifact(&format!(
+                        "scene-{}-step-{}.png",
+                        self.step_at.0, self.step_at.1,
+                    ))
+                    .map_err(io)?;
             }
             Action::Hover(target) => {
                 let found = self.wait_until(target, step.timeout.unwrap_or(FIND_TIMEOUT), false)?;

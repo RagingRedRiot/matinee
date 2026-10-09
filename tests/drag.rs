@@ -7,6 +7,10 @@ use std::process::Command;
 /// Run the drag storyboard with `steps` in place of its scene, returning
 /// whether it passed and everything it printed.
 fn run_drag(name: &str, steps: &str) -> (bool, String) {
+    run_drag_with_seed(name, steps, "")
+}
+
+fn run_drag_with_seed(name: &str, steps: &str, seed: &str) -> (bool, String) {
     let dir = std::env::temp_dir().join(format!("matinee-drag-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::copy("tests/fixtures/drag/drag.c", dir.join("drag.c")).unwrap();
@@ -14,7 +18,7 @@ fn run_drag(name: &str, steps: &str) -> (bool, String) {
     let head = &story[..story.find("[[scene]]").unwrap()];
     std::fs::write(
         dir.join("demo.toml"),
-        format!("{head}[[scene]]\nsteps = [\n{steps}\n]\n"),
+        format!("{head}{seed}\n[[scene]]\nsteps = [\n{steps}\n]\n"),
     )
     .unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_matinee"))
@@ -31,6 +35,17 @@ fn run_drag(name: &str, steps: &str) -> (bool, String) {
             String::from_utf8_lossy(&out.stderr)
         ),
     )
+}
+
+#[test]
+#[ignore = "needs a C compiler and GTK 4 headers"]
+fn a_slow_seed_does_not_rush_the_drag() {
+    let (ok, text) = run_drag_with_seed(
+        "slow-seed",
+        r#"{ drag = "Drag me", to = "Drop here" }, { expect = "dropped: token" }"#,
+        "[[seed]]\nrun = \"sleep 3\"\n",
+    );
+    assert!(ok, "{text}");
 }
 
 #[test]

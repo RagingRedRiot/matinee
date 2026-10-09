@@ -6,6 +6,22 @@ use std::process::Command;
 
 #[test]
 #[ignore = "needs gnome-calculator"]
+fn menu_coordinates_open_a_verified_dialog_and_return_focus() {
+    let out = Command::new(env!("CARGO_BIN_EXE_matinee"))
+        .args(["run", "tests/fixtures/calculator-menu/demo.toml"])
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("all 6 steps passed"), "{text}");
+}
+
+#[test]
+#[ignore = "needs gnome-calculator"]
 fn probe_lists_a_gtk_apps_controls() {
     let out = Command::new(env!("CARGO_BIN_EXE_matinee"))
         .args([
@@ -24,6 +40,10 @@ fn probe_lists_a_gtk_apps_controls() {
     );
     assert!(text.contains("window \"Calculator\""), "{text}");
     assert!(text.contains("app \"gnome-calculator\""), "{text}");
+    assert!(
+        text.contains("control: semantic targets published"),
+        "{text}"
+    );
     for control in ["button \"7\"", "button \"=\"", "button \"Main Menu\""] {
         assert!(text.contains(control), "{control} missing:\n{text}");
     }
@@ -185,8 +205,10 @@ steps = [{ run = "true" }, { click = "+", timeout = "1s" }]
     std::fs::remove_dir_all(&dir).unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success());
+    // The window's height follows the installed fonts, so only its width,
+    // the screen's, is fixed.
     assert!(
-        stderr.contains("is behind the terminal pane: the window is 800x507"),
+        stderr.contains("is behind the terminal pane: the window is 800x"),
         "{stderr}"
     );
 }

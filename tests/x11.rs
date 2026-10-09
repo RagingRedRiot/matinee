@@ -23,6 +23,26 @@ fn an_x11_app_takes_clicks_and_typing() {
 }
 
 #[test]
+#[ignore = "needs Xwayland and Python's Tk"]
+fn probe_reports_the_coordinate_fallback_for_tk() {
+    let out = Command::new(env!("CARGO_BIN_EXE_matinee"))
+        .args(["probe", "tests/fixtures/x11/demo.toml"])
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("window \"Tk lab\""), "{text}");
+    assert!(
+        text.contains("control: window coordinates available; semantic targets unavailable"),
+        "{text}"
+    );
+}
+
+#[test]
 #[ignore = "needs Xwayland, a C++ compiler, and Qt 5 headers"]
 fn a_qt_5_app_under_x11_is_targeted_by_name() {
     let out = Command::new(env!("CARGO_BIN_EXE_matinee"))

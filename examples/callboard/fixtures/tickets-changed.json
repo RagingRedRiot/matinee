@@ -1,0 +1,8 @@
+[
+  {"id": 1, "title": "Refund for order 1182", "fingerprint": "reply-4",
+   "meta": {"status": "support replied"}},
+  {"id": 2, "title": "Login fails on Safari", "fingerprint": "reply-7",
+   "meta": {"status": "investigating"}},
+  {"id": 3, "title": "Invoice address change", "fingerprint": "reply-1",
+   "meta": {"status": "waiting on support"}}
+]

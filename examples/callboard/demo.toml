@@ -56,3 +56,26 @@ steps = [
   { key = "enter", hold = "2.6s" },
   { expect = "Inbox (4)" },
 ]
+
+[[scene]]
+caption = "Zoom out to see everything"
+steps = [
+  { key = "ctrl+down", hold = "0.8s" },
+  { key = "ctrl+down", hold = "0.8s" },
+  { expect = "Zoom 75%", role = "button" },
+  { click = "Layout: Day", hold = "0.6s" },
+  { click = "Show all", hold = "2.2s" },
+  { expect = "Tickets I'm waiting on*", role = "label" },
+]
+
+[[scene]]
+caption = "A watch flags the ticket that changed"
+steps = [
+  { terminal = "./check-tickets | callboard watch report tickets --title \"Tickets I'm waiting on\"", run = "callboard watch report tickets --title \"Tickets I'm waiting on\" < fixtures/tickets-changed.json", hold = "0.6s" },
+  { wait_for = "Acknowledge", role = "button" },
+  { hover = "Refund for order 1182", hold = "2.2s" },
+  { click = "Acknowledge", hold = "1.2s" },
+  { click = "Zoom *", role = "button", hold = "0.8s" },
+  { camera = "overview", hold = "1.8s" },
+  { expect = "Zoom 100%", role = "button" },
+]

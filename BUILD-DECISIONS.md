@@ -121,12 +121,14 @@ for untrusted or malicious software, such as malware detonation, and must not
 be presented as one. It is not designed or tested to withstand a program
 trying to escape, and it would not hold up as that kind of safety net.
 
-The current runner uses a fresh home and runtime directory, starts GUI apps
-in that home, disables their network by default, and reaps detached children.
-This is useful state isolation, not yet a containment boundary. Apps can
-still access host paths, fixed socket locations, and some system services.
-Separate per-process network namespaces also prevent a terminal and GUI app
-from talking over localhost unless they share a namespace.
+The prototype runner used a fresh home and runtime directory, started GUI apps
+in that home, disabled their network by default, and reaped detached children.
+That was useful state isolation, not a containment boundary: apps could still
+access host paths, fixed socket locations, and some system services. Its
+per-process network namespaces also prevented terminal and GUI apps from
+talking over localhost. The current built-in boundary addresses these gaps and
+is covered by `tests/boundary.rs`; broader release validation remains tracked
+in [RELEASE.md](RELEASE.md).
 
 A local feasibility experiment wrapped the **entire** runner and its children
 in one private user, mount, PID, and network boundary. A first version with a
@@ -281,10 +283,11 @@ Keep a fixed-camera variant for size and timing comparisons. Use
 `probe` output to author selectors and include the available names, roles,
 windows, and nearby matches in failure messages.
 
-The GTK fixture now exercises focus, scrolling, drag, dialogs, a file picker,
-clipboard, and multiple windows. Repeat those actions on supported real apps;
-menus and toolkit-specific focus behavior still need stories. Test time and
-theme controls in each supported toolkit, and repeat the visual-stability
-measurement on another machine. Implement and retest the chosen containment
-boundary before calling a session isolated. Then write the release CI
-recipe.
+The prototype GTK fixture exercised focus, scrolling, drag, dialogs, a file
+picker, clipboard, and multiple windows. Repeat those actions on supported
+real apps; menus and toolkit-specific focus behavior still need stories.
+Check themes in each supported toolkit and repeat the visual-stability
+measurement on another machine. The chosen boundary is implemented and has
+local tests, including outside networking. The release CI recipe is written;
+its first hosted run remains to be confirmed. [RELEASE.md](RELEASE.md) is the
+current checklist rather than this original implementation plan.

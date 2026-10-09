@@ -101,7 +101,7 @@ steps = [
 ]
 ```
 
-## How it works (planned)
+## How it works
 
 - **Session:** each demo runs in a headless desktop session, with seeded
   state and a process and filesystem boundary that has been
@@ -119,7 +119,7 @@ steps = [
 - **Capture and encode:** frames from the compositor, deduplicated, then
   a GIF (palette per clip, changed rectangles only, holds merged into long
   frames). Video and a poster are possible later outputs.
-- **In-process driver:** for apps that can link a test harness (egui with
+- **In-process driver (deferred):** for apps that can link a test harness (egui with
   egui_kittest, as in the prototype), a precise mode with no compositor at
   all.
 
@@ -160,8 +160,14 @@ escape hatch, not a requirement for the first release.
 
 ## Plan
 
-The working contracts, experiment results, and remaining gates are in
-[BUILD-DECISIONS.md](BUILD-DECISIONS.md). The implementation order is:
+The core runner, storyboard authoring tools, external GUI and terminal drivers,
+frame pipeline, camera, and encoder below are implemented. The CI recipe now
+lives in [.github/workflows/ci.yml](.github/workflows/ci.yml); its hosted run
+still needs confirmation. The in-process driver is deferred beyond the first
+release. The current remaining gates are tracked in [RELEASE.md](RELEASE.md),
+with support evidence in [SUPPORT.md](SUPPORT.md).
+
+The original implementation order was:
 
 1. **Carry the proven contracts into the runner.** Use callboard's GitHub GIFs
    as the output reference. Reproduce the tested isolation boundary with the

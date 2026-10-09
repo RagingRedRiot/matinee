@@ -47,6 +47,73 @@ pub enum PanePosition {
 }
 
 impl Story {
+    /// The GUI mechanisms a checked story declares, rather than a claim
+    /// about what its app will publish at runtime.
+    pub fn control_usage(&self) -> Vec<&'static str> {
+        if self.launches.is_empty() {
+            return vec!["terminal only"];
+        }
+        let mut semantic = self.launches.iter().any(|l| l.wait_for.is_some());
+        let terminal = self.has_terminal();
+        let mut coordinates = false;
+        let mut keyboard = false;
+        let mut unqualified = false;
+        for step in self.steps() {
+            match &step.action {
+                Action::Hover(_)
+                | Action::Click(_)
+                | Action::Drag { .. }
+                | Action::DragSlider { .. }
+                | Action::Camera(CameraMove::Focus { .. }) => {
+                    semantic = true;
+                }
+                Action::Expect(t) | Action::WaitFor(t) => {
+                    if !terminal
+                        || t.role.is_some()
+                        || t.within.is_some()
+                        || t.near.is_some()
+                        || t.window.is_some()
+                        || t.app.is_some()
+                    {
+                        semantic = true;
+                    } else {
+                        unqualified = true;
+                    }
+                }
+                Action::HoverAt(_)
+                | Action::ClickAt(_)
+                | Action::DragAt { .. }
+                | Action::Camera(CameraMove::FocusAt { .. }) => coordinates = true,
+                Action::Type {
+                    terminal: false, ..
+                }
+                | Action::Key {
+                    terminal: false, ..
+                } => {
+                    keyboard = true;
+                }
+                _ => {}
+            }
+        }
+        let mut usage = vec![];
+        if semantic {
+            usage.push("semantic targets required");
+        }
+        if coordinates {
+            usage.push("window coordinates");
+        }
+        if keyboard {
+            usage.push("focused keyboard input");
+        }
+        if usage.is_empty() {
+            usage.push("capture only; GUI result unverified");
+        }
+        if unqualified {
+            usage.push("unqualified assertions may match GUI or terminal");
+        }
+        usage
+    }
+
     /// Whether the story shows a terminal: it runs commands, or launches
     /// no app and so is a terminal demo.
     pub fn has_terminal(&self) -> bool {

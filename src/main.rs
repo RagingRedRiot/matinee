@@ -1,4 +1,6 @@
 use matinee::{a11y::A11y, boundary::Boundary, runner::Runner, session::Session, story::Story};
+use std::hash::{Hash, Hasher};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use std::{path::PathBuf, process::ExitCode};
@@ -28,6 +30,8 @@ commands:
           window, and the name and role of everything showing in it
 
 options:
+  --artifacts <folder>  with run or record, save assertion stills and the
+          actual failed-session screen, grouped by story and theme
   --no-isolation  run, record, shell, snapshot, and probe on the host instead
           of in namespaces, for systems that do not allow unprivileged user
           namespaces; commands and apps still get a fresh home, environment,
@@ -35,6 +39,7 @@ options:
 
 /// Set by `--no-isolation`: run stories on the host, without namespaces.
 static NO_ISOLATION: AtomicBool = AtomicBool::new(false);
+static ARTIFACTS: OnceLock<PathBuf> = OnceLock::new();
 
 /// The boundary a command runs `story` in, isolated unless asked not to be.
 fn boundary_for(story: &Story, work: &std::path::Path) -> std::io::Result<Boundary> {
@@ -48,6 +53,36 @@ fn boundary_for(story: &Story, work: &std::path::Path) -> std::io::Result<Bounda
 
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let end = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    if let Some(at) = args[..end].iter().position(|a| a == "--artifacts") {
+        if at + 1 >= end || args[at + 1].starts_with("--") {
+            eprintln!("matinee: --artifacts <folder> applies to run and record\n{USAGE}");
+            return ExitCode::from(2);
+        }
+        let directory = PathBuf::from(&args[at + 1]);
+        args.drain(at..at + 2);
+        if !matches!(
+            args.iter()
+                .find(|a| a.as_str() != "--no-isolation")
+                .map(String::as_str),
+            Some("run" | "record")
+        ) {
+            eprintln!("matinee: --artifacts <folder> applies to run and record\n{USAGE}");
+            return ExitCode::from(2);
+        }
+        let directory = if directory.is_absolute() {
+            directory
+        } else {
+            match std::env::current_dir() {
+                Ok(cwd) => cwd.join(directory),
+                Err(e) => {
+                    eprintln!("matinee: {e}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        };
+        ARTIFACTS.set(directory).expect("artifacts configured once");
+    }
     // `--no-isolation` may come anywhere before a `--` that starts a
     // command.
     let end = args.iter().position(|a| a == "--").unwrap_or(args.len());
@@ -98,6 +133,55 @@ fn main() -> ExitCode {
     }
 }
 
+/// Assertion and failure images are written inside the same session as the
+/// story. Copy them out before deleting its work area; never relaunch an app
+/// to reconstruct a failed state. The hash distinguishes equal output names
+/// in different project folders.
+fn collect_artifacts(
+    work: &std::path::Path,
+    story: &Story,
+    theme: matinee::story::Theme,
+) -> std::io::Result<()> {
+    let Some(root) = ARTIFACTS.get() else {
+        return Ok(());
+    };
+    let source = work.join("artifacts");
+    if !source.exists() {
+        return Ok(());
+    }
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    let directory = if story.dir.as_os_str().is_empty() {
+        std::path::Path::new(".")
+    } else {
+        &story.dir
+    };
+    std::fs::canonicalize(directory)?.hash(&mut hash);
+    story.demo.output.hash(&mut hash);
+    let name = story
+        .demo
+        .output
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy();
+    let invocation = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(std::io::Error::other)?
+        .as_nanos();
+    let destination = root.join(format!(
+        "{name}-{:016x}-{}-{invocation}",
+        hash.finish(),
+        theme.name()
+    ));
+    std::fs::create_dir_all(&destination)?;
+    for entry in std::fs::read_dir(&source)? {
+        let entry = entry?;
+        std::fs::copy(entry.path(), destination.join(entry.file_name()))?;
+    }
+    std::fs::remove_dir_all(source)?;
+    println!("artifacts: {}", destination.display());
+    Ok(())
+}
+
 fn check(paths: impl Iterator<Item = PathBuf>) -> ExitCode {
     let mut failed = false;
     for path in paths {
@@ -112,6 +196,7 @@ fn check(paths: impl Iterator<Item = PathBuf>) -> ExitCode {
                     story.scenes.len(),
                     themes.join(" and "),
                 );
+                println!("  control: {}", story.control_usage().join("; "));
             }
             Err(e) => {
                 eprintln!("{e}");
@@ -317,10 +402,27 @@ fn print_tree(session: &Session, all: bool) -> std::io::Result<()> {
     let apps = a11y.apps();
     if apps.is_empty() {
         println!("\nno app published an accessibility tree");
+        if !windows.is_empty() {
+            println!("control: window coordinates available; semantic targets unavailable");
+        }
     }
     for app in apps {
         println!("\napp \"{}\" (pid {})", app.name, app.pid);
         let nodes = a11y.nodes(&app, all);
+        let named = nodes.iter().any(|n| {
+            n.depth > 0
+                && n.showing
+                && (!n.name.is_empty() || n.text.as_ref().is_some_and(|t| !t.is_empty()))
+        });
+        if named {
+            println!(
+                "  control: semantic targets published; verify each selector's role and uniqueness"
+            );
+        } else {
+            println!(
+                "  control: no named controls published; use window coordinates or capture only"
+            );
+        }
         for (i, node) in nodes.iter().enumerate() {
             if node.depth > 0 && node.name.is_empty() && node.text.is_none() && !all {
                 continue;
@@ -371,9 +473,18 @@ fn run(path: &str) -> ExitCode {
             let performed = Session::start(&boundary, &story, theme)
                 .map_err(matinee::runner::Failure::from)
                 .and_then(|mut session| {
-                    let mut runner = Runner::new(&mut session, &story)?;
-                    runner.launch(&story)?;
-                    runner.perform(&story)
+                    session.enable_artifacts(ARTIFACTS.get().is_some());
+                    let result = (|| {
+                        let mut runner = Runner::new(&mut session, &story)?;
+                        runner.launch(&story)?;
+                        runner.perform(&story)
+                    })();
+                    if result.is_err() {
+                        if let Err(e) = session.save_artifact("failure.png") {
+                            eprintln!("matinee: could not save failure screen: {e}");
+                        }
+                    }
+                    result
                 });
             match performed {
                 Ok(steps) => {
@@ -387,7 +498,12 @@ fn run(path: &str) -> ExitCode {
             }
         })
     });
+    let collected = collect_artifacts(&work, &story, theme);
     let _ = std::fs::remove_dir_all(&work);
+    if let Err(e) = collected {
+        eprintln!("matinee: collecting artifacts: {e}");
+        return ExitCode::FAILURE;
+    }
     match result {
         Ok(0) => ExitCode::SUCCESS,
         Ok(_) => ExitCode::FAILURE,
@@ -519,22 +635,32 @@ fn record_story(path: &std::path::Path, story: &Story) -> bool {
                 let recorded = Session::start(&boundary, story, theme)
                     .map_err(matinee::runner::Failure::from)
                     .and_then(|mut session| {
-                        let mut runner = Runner::new(&mut session, story)?;
-                        runner.launch(story)?;
-                        drop(runner);
-                        session.start_recording();
-                        session.run_for(LEAD_IN)?;
-                        let mut runner = Runner::new(&mut session, story)?;
-                        let steps = runner.perform(story)?;
-                        drop(runner);
-                        // End on the whole screen, where the loop restarts.
-                        session.mark_segment("end");
-                        session.camera.overview();
-                        session.run_for(TAIL)?;
-                        let recording = session.stop_recording().expect("recording was started");
-                        let gif = boundary.work().join("out.gif");
-                        let written = recording.write_gif(&gif, story.demo.fps)?;
-                        Ok((steps, written))
+                        session.enable_artifacts(ARTIFACTS.get().is_some());
+                        let result = (|| {
+                            let mut runner = Runner::new(&mut session, story)?;
+                            runner.launch(story)?;
+                            drop(runner);
+                            session.start_recording();
+                            session.run_for(LEAD_IN)?;
+                            let mut runner = Runner::new(&mut session, story)?;
+                            let steps = runner.perform(story)?;
+                            drop(runner);
+                            // End on the whole screen, where the loop restarts.
+                            session.mark_segment("end");
+                            session.camera.overview();
+                            session.run_for(TAIL)?;
+                            let recording =
+                                session.stop_recording().expect("recording was started");
+                            let gif = boundary.work().join("out.gif");
+                            let written = recording.write_gif(&gif, story.demo.fps)?;
+                            Ok((steps, written))
+                        })();
+                        if result.is_err() {
+                            if let Err(e) = session.save_artifact("failure.png") {
+                                eprintln!("matinee: could not save failure screen: {e}");
+                            }
+                        }
+                        result
                     });
                 match recorded {
                     Ok((steps, written)) => {
@@ -585,6 +711,11 @@ fn record_story(path: &std::path::Path, story: &Story) -> bool {
                 }
             })
         });
+        if let Err(e) = collect_artifacts(&work, story, theme) {
+            eprintln!("matinee: collecting artifacts: {e}");
+            failed = true;
+            break;
+        }
         let target = story.dir.join(format!(
             "{}-{}.gif",
             story.demo.output.display(),

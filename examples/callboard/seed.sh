@@ -19,9 +19,20 @@ for title in "Write the upgrade notes" "Tag the release candidate"; do
   callboard todo add "$release" "$title" > /dev/null
 done
 
-# The layout the app opens: feeds on the left, boards on the right.
+# A watch: support tickets the user follows, reported on by a script. Its
+# first report is the baseline, so nothing needs attention yet.
+title="Tickets I'm waiting on"
+callboard watch report tickets --title "$title" < /dev/null > /dev/null
+callboard watch item add tickets https://support.example.com/t/1182 --label 'My refund' > /dev/null
+callboard watch item add tickets https://support.example.com/t/1190 --label 'Safari login bug' > /dev/null
+callboard watch item add tickets https://support.example.com/t/1201 --label 'New invoice address' > /dev/null
+callboard watch report tickets --title "$title" < fixtures/tickets.json > /dev/null
+
+# The layout the app opens: feeds on the left, boards on the right, and the
+# watch past the right edge of the view, found by zooming out.
 card() { printf '{"target":%s,"x":%s,"y":%s,"width":%s,"height":%s,"collapsed":false}' "$@"; }
-printf '{"view":{"x":0,"y":0},"cards":[%s,%s,%s,%s]}' \
+printf '{"view":{"x":0,"y":0},"cards":[%s,%s,%s,%s,%s]}' \
+  "$(card '{"kind":"watch","name":"tickets"}' 940 12 420 300)" \
   "$(card '{"kind":"feed","name":"reviews"}' 12 12 450 330)" \
   "$(card '{"kind":"feed","name":"nightly"}' 12 354 450 236)" \
   "$(card "{\"kind\":\"board\",\"id\":$release}" 474 400 440 250)" \

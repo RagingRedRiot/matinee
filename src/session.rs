@@ -46,6 +46,7 @@ pub struct Session<'a> {
     oversized: Vec<String>,
     /// How far recordings' lossy compression may move a color.
     lossy: u8,
+    artifacts: bool,
     /// What recordings show of the screen.
     pub camera: Camera,
 }
@@ -114,6 +115,7 @@ impl<'a> Session<'a> {
             pointer_shown: false,
             oversized: vec![],
             lossy: story.demo.lossy,
+            artifacts: false,
             camera: Camera::new(
                 w as f64,
                 h as f64,
@@ -328,7 +330,16 @@ impl<'a> Session<'a> {
     /// Frames are paced in real time, so apps have time to draw, while the
     /// time apps are told comes from the frame count.
     pub fn tick(&mut self) -> io::Result<Frame> {
-        let due = self.started + self.period * (self.frames + 1);
+        let mut due = self.started + self.period * (self.frames + 1);
+        let now = Instant::now();
+        if due < now {
+            // Seeding, compilation, or a slow render can leave the clock
+            // behind. Rebase its wall-time anchor instead of rushing input
+            // through overdue frames before the app can process it. The
+            // frame index, and therefore camera and pointer paths, stay put.
+            self.started = now - self.period * self.frames;
+            due = now + self.period;
+        }
         loop {
             let left = due.saturating_duration_since(Instant::now());
             self.compositor.dispatch(left)?;
@@ -339,10 +350,7 @@ impl<'a> Session<'a> {
         self.check_children()?;
         self.warn_oversized();
         self.frames += 1;
-        let mut frame = self.compositor.render(self.now())?;
-        if let Some((terminal, pane)) = &self.terminal {
-            pane.draw(terminal, &mut frame, self.scale);
-        }
+        let frame = self.current_frame()?;
         self.camera.step();
         if let Some(recording) = &mut self.recording {
             let size = (self.size[0] as f64, self.size[1] as f64);
@@ -353,6 +361,30 @@ impl<'a> Session<'a> {
             recording.add(&frame, self.camera.view(), pointer);
         }
         Ok(frame)
+    }
+
+    /// Draw the current session without advancing input, the camera, or time.
+    pub fn current_frame(&mut self) -> io::Result<Frame> {
+        let mut frame = self.compositor.render(self.now())?;
+        if let Some((terminal, pane)) = &self.terminal {
+            pane.draw(terminal, &mut frame, self.scale);
+        }
+        Ok(frame)
+    }
+
+    pub fn enable_artifacts(&mut self, enabled: bool) {
+        self.artifacts = enabled;
+    }
+
+    /// Save a full-resolution still of an assertion or failure in this
+    /// session's writable work area. The host collects it after the run.
+    pub fn save_artifact(&mut self, name: &str) -> io::Result<()> {
+        if self.artifacts {
+            let directory = self.boundary.work().join("artifacts");
+            std::fs::create_dir_all(&directory)?;
+            self.current_frame()?.write_png(&directory.join(name))?;
+        }
+        Ok(())
     }
 
     /// The terminal pane's rectangle, when the story has one.

@@ -38,6 +38,80 @@ fn record(dir: &Path, args: &[&str]) -> (bool, String) {
 }
 
 #[test]
+fn assertion_and_failure_stills_come_back_from_run_and_record() {
+    let text = story("failure", "ready").replace(
+        "steps = [{ run = \"echo ready\" }]",
+        "steps = [{ run = \"echo ready\" }, { wait_for = \"ready\" }, { expect = \"ready\" }, { expect = \"wrong\", timeout = \"200ms\" }]",
+    );
+    let dir = folder("artifacts", &[("demo.toml", text)]);
+    for (command, isolation) in [
+        ("run", true),
+        ("record", true),
+        ("run", false),
+        ("record", false),
+    ] {
+        let directory = format!("{command}-{isolation}");
+        let mut process = Command::new(env!("CARGO_BIN_EXE_matinee"));
+        if !isolation {
+            process.arg("--no-isolation");
+        }
+        let out = process
+            .args([command, "demo.toml", "--artifacts", &directory])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        let diagnostic = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{diagnostic}");
+        assert!(diagnostic.contains("scene 1, step 4"), "{diagnostic}");
+        let collected = std::fs::read_dir(dir.join(directory))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        for name in ["scene-1-step-2.png", "scene-1-step-3.png", "failure.png"] {
+            let decoder = png::Decoder::new(std::io::BufReader::new(
+                std::fs::File::open(collected.join(name)).unwrap(),
+            ));
+            let mut reader = decoder.read_info().unwrap();
+            assert_eq!((reader.info().width, reader.info().height), (640, 360));
+            let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
+            let frame = reader.next_frame(&mut pixels).unwrap();
+            let pixels = &pixels[..frame.buffer_size()];
+            assert!(
+                pixels.chunks_exact(3).any(|p| p != &pixels[..3]),
+                "blank {name}"
+            );
+        }
+    }
+    assert!(!dir.join("failure-dark.gif").exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn artifacts_need_a_directory_and_a_running_story() {
+    for args in [
+        vec!["run", "demo.toml", "--artifacts"],
+        vec![
+            "check",
+            "examples/terminal/demo.toml",
+            "--artifacts",
+            "unused",
+        ],
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_matinee"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2));
+        assert!(
+            String::from_utf8_lossy(&out.stderr)
+                .contains("--artifacts <folder> applies to run and record")
+        );
+    }
+}
+
+#[test]
 fn every_storyboard_in_the_folder_is_recorded() {
     let dir = folder(
         "all",

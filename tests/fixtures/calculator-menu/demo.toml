@@ -1,0 +1,22 @@
+# This Calculator build publishes the menu itself, but no menu children.
+# Use a reviewed point for Preferences, then assert the actual dialog and
+# verify that closing it returns keyboard/pointer focus to the calculator.
+
+[demo]
+output = "calculator-menu"
+size = [800, 600]
+themes = ["light"]
+
+[launch]
+app = "gnome-calculator"
+wait_for = "="
+
+[[scene]]
+steps = [
+  { click = "Main Menu" },
+  { click_at = [650, 294], window = "Calculator" },
+  { expect = "Preferences" },
+  { key = "escape" },
+  { click = "7" },
+  { expect = "7", role = "text box" },
+]

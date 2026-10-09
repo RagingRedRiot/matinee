@@ -55,6 +55,28 @@ fn defaults() {
 }
 
 #[test]
+fn control_reporting_does_not_claim_a_gui_result_from_terminal_text() {
+    let capture = parse(r#"{ run = "echo ready" }, { expect = "ready" }"#).unwrap();
+    assert_eq!(
+        capture.control_usage(),
+        [
+            "capture only; GUI result unverified",
+            "unqualified assertions may match GUI or terminal",
+        ]
+    );
+    let semantic =
+        parse(r#"{ run = "echo ready" }, { expect = "ready", role = "label" }"#).unwrap();
+    assert_eq!(semantic.control_usage(), ["semantic targets required"]);
+    let explicit = parse(r#"{ click_at = [20, 40] }, { key = "enter" }"#).unwrap();
+    assert_eq!(
+        explicit.control_usage(),
+        ["window coordinates", "focused keyboard input"]
+    );
+    let terminal = Story::load("examples/terminal/demo.toml".as_ref()).unwrap();
+    assert_eq!(terminal.control_usage(), ["terminal only"]);
+}
+
+#[test]
 fn x11_is_asked_for_per_launch() {
     let story = Story::parse(
         "[demo]\noutput = \"d\"\nsize = [800, 480]\n[[launch]]\napp = \"old\"\nx11 = true\n[[launch]]\napp = \"new\"\n[[scene]]\nsteps = [{ click = \"Go\" }]\n",

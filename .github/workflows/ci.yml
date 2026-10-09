@@ -1,0 +1,122 @@
+name: Story correctness and visual review
+
+# Pull requests run main's copy of this file, never the PR's: under
+# `pull_request_target` GitHub takes the workflow from the base branch, so a PR
+# cannot change which steps run or what permissions they get. The steps then
+# check out and test the PR's code, which is untrusted. That is safe only
+# while every rule below holds:
+#
+#   - The token stays read-only, and checkouts never keep credentials.
+#   - No secrets at repository level. A future release workflow keeps its
+#     secrets in a protected environment that this workflow never names.
+#   - No workflow in this repository restores an Actions cache. Untrusted code
+#     here runs in main's cache scope and can write entries there even without
+#     a cache step, so anything that restores one could be poisoned.
+#   - Nothing trusted consumes this workflow's artifacts; they are for review.
+#
+# The PR's code still includes the tests and scripts it runs. controls.yml keeps
+# changes to those, and to the build files, from merging unreviewed.
+#
+# Pushes to main, and manual runs by maintainers on any branch, use that
+# branch's copy, which is how a workflow change is tried before merging.
+on:
+  push:
+    branches: [main]
+  pull_request_target:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: matinee-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The commit, not the branch, so a later push cannot swap the code.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - name: Install build and integration dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpixman-1-dev libxkbcommon-dev libwayland-dev \
+            dbus at-spi2-core gnome-calculator libgtk-4-dev qtbase5-dev qtwayland5 \
+            xwayland python3-tk passt ffmpeg fonts-dejavu-core libgl1-mesa-dri
+      - name: Allow private user namespaces on this disposable runner
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Formatting and lint
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+      - name: Core and isolation tests
+        run: |
+          mkdir -p target/ci-logs
+          set -o pipefail
+          cargo test --locked 2>&1 | tee target/ci-logs/core.log
+      - name: GTK, drag, X11, and network integration tests
+        run: |
+          set -o pipefail
+          cargo test --locked -- --ignored --test-threads=1 2>&1 | tee target/ci-logs/integration.log
+      - name: Build recording binary
+        run: cargo build --locked --release
+      - name: Verify installation from source
+        run: |
+          cargo install --path . --locked --root target/install-check
+          target/install-check/bin/matinee check examples/terminal/demo.toml examples/calculator/demo.toml
+      - name: Record both themes and fixed-camera comparisons
+        run: python3 scripts/review.py --fixed
+      - name: Save recordings, stills, differences, and test logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: matinee-linux-visual-review
+          path: |
+            target/review/
+            target/ci-logs/
+          if-no-files-found: warn
+          retention-days: 14
+
+  minimum-rust:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The commit, not the branch, so a later push cannot swap the code.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+        with:
+          toolchain: 1.87.0
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpixman-1-dev libxkbcommon-dev libwayland-dev
+      - name: Check the advertised minimum Rust version
+        run: cargo check --locked --all-targets
+
+  # One stable name for branch protection to require. `if: always()` makes a
+  # skipped or cancelled job a failure here rather than a silent pass.
+  complete:
+    name: ci complete
+    needs: [linux, minimum-rust]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Every CI job succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "results: $RESULTS"
+          for result in $RESULTS; do test "$result" = success; done

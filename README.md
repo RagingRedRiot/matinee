@@ -42,7 +42,7 @@ alike.
 
 ## What it needs
 
-Linux with unprivileged user namespaces (on Ubuntu, see
+Rust 1.87 or newer to build, and Linux with unprivileged user namespaces (on Ubuntu, see
 `kernel.apparmor_restrict_unprivileged_userns`), plus what any desktop that
 runs GTK or Qt already has: `dbus-daemon`, at-spi2-core, libpixman, and
 libxkbcommon. Stories that opt into network access also need `pasta`, from
@@ -57,6 +57,12 @@ network.
 ```sh
 cargo build --release
 target/release/matinee record examples/calculator/demo.toml
+```
+
+To install the binary from a source checkout:
+
+```sh
+cargo install --path . --locked
 ```
 
 ## What the isolation is for
@@ -183,6 +189,9 @@ this one.
 - [VISION.md](VISION.md): philosophy, goals, and the plan.
 - [BUILD-DECISIONS.md](BUILD-DECISIONS.md): working contracts, experiment
   results, and the architecture.
+- [STORYBOARD.md](STORYBOARD.md): writing and checking a demo.
+- [SUPPORT.md](SUPPORT.md): toolkit support and what has been verified.
+- [RELEASE.md](RELEASE.md): current release gates and the CI review recipe.
 
 ## License
 

@@ -1,0 +1,33 @@
+# Release notes
+
+## 0.1.0 — unreleased draft
+
+Matinee performs versioned storyboard files against real Linux programs and
+records light and dark GIFs for READMEs. Terminal, GUI, and mixed stories share
+one format, with seeded state, checked command status, and observable assertions.
+
+- Built-in headless Wayland compositor, input driver, frame timeline, camera,
+  overlays, terminal renderer, and GIF encoder; no desktop session or GPU needed.
+- Private Linux namespaces keep host files, identity, sessions, and sockets out
+  of recordings. Explicit network opt-in uses pasta; `--no-isolation` provides
+  a documented fallback for hosts that prohibit namespaces.
+- Semantic AT-SPI targets with context and ambiguity diagnostics, plus reviewed
+  window coordinates for controls without usable accessibility data. Optional
+  Xwayland supports Tk input and Qt 5 named controls.
+- `check`, `probe`, `run`, `record`, `snapshot`, and `shell` authoring commands;
+  project-wide recording validates stories and output collisions first.
+- GIF scene-size reporting and practical size budgets. Automatic framing targets
+  readability at the intended README width; fixed-camera comparisons are supported.
+- `--artifacts` captures real assertion and failure screens. CI checks story
+  correctness and saves recordings, stills, and visual differences for review.
+- Input pacing resumes normally after slow setup or rendering instead of rushing
+  overdue frames and losing interactions such as GTK drops.
+
+Source builds require Rust 1.87 or newer. The locked font dependency does not
+compile with the previously advertised 1.85 minimum. First-release validation
+is Linux x86_64; other architectures and toolkit/theme combinations need their
+own evidence. See [SUPPORT.md](SUPPORT.md) and [RELEASE.md](RELEASE.md).
+
+The first release is source-only. In-process drivers, video output, prebuilt
+binary packages, and Cargo registry publication are deferred. Time remains
+live, and byte-identical GIFs across machines are not a promise.

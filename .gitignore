@@ -1,2 +1,3 @@
 target/
 prototypes/
+__pycache__/

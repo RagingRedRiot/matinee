@@ -1,0 +1,126 @@
+name: Controls
+
+# A check a pull request cannot rewrite.
+#
+# ci.yml runs main's copy of itself for a pull request, but the code it tests
+# is the PR's: a PR can edit the tests and scripts that CI runs and still go
+# green. Merging a workflow change also changes what every later PR runs.
+# Required status checks match by name, not by content.
+#
+# This workflow runs on `pull_request_target`, which uses the BASE branch's
+# copy of this file. A PR cannot change what runs here without first merging
+# a change to main, which this same check gates. Branch protection must
+# require "control files reviewed" for that to hold.
+#
+# It fails any PR that touches a control file unless a maintainer with write
+# access applies the `reviewed-controls` label to the revision now at the head.
+# Only the labelling event approves: any later push, base change, label change,
+# or re-run of an old run fails the check again.
+#
+# SAFETY: `pull_request_target` runs with the base repository's token. This
+# job must never check out or execute the PR's code. It asks the API which
+# files changed and compares names. Keep it that way.
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled, edited]
+permissions:
+  contents: read
+  pull-requests: read
+concurrency:
+  group: controls-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  control-files:
+    name: control files reviewed
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Evaluate control changes using base policy only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import PurePosixPath
+          import subprocess
+
+          # What decides whether "passing" means anything:
+          #   .github/, scripts/   the workflows, this one included, and the
+          #                        review script CI runs
+          #   build files          what gets compiled, and with which toolchain
+          #   src/boundary.rs      the isolation boundary that keeps the host's
+          #                        files and identity out of recordings
+          #   tests/               append-only: a new test or fixture needs no
+          #                        review, but changing, deleting, or renaming
+          #                        one can weaken what CI proves
+          # A rename's old path counts too, so a control cannot be moved to an
+          # unlisted path and rewritten there.
+          CONTROL_PREFIXES = ('.github/', '.cargo/', 'scripts/')
+          APPEND_ONLY_PREFIXES = ('tests/',)
+          BUILD_NAMES = {'Cargo.toml', 'Cargo.lock', 'build.rs', 'rust-toolchain', 'rust-toolchain.toml'}
+          GUARDED_FILES = {'src/boundary.rs'}
+
+          def protected(path, status):
+              """`status` is GitHub's: 'added', 'modified', 'removed', 'renamed', ..."""
+              if path.startswith(APPEND_ONLY_PREFIXES):
+                  return status != 'added'
+              return (
+                  path.startswith(CONTROL_PREFIXES)
+                  or PurePosixPath(path).name in BUILD_NAMES
+                  or path in GUARDED_FILES
+              )
+
+
+          def evaluate(event, current, files, permission, attempt):
+              for side in ('head', 'base'):
+                  if current[side]['sha'] != event['pull_request'][side]['sha']:
+                      raise RuntimeError('PR revision changed; this event cannot approve it.')
+              if len(files) != current['changed_files'] or len(files) >= 3000:
+                  raise RuntimeError('Incomplete or oversized file list; refusing to pass.')
+              # A rename's old path counts as removed, its new path as renamed.
+              paths = [(f['filename'], f['status']) for f in files]
+              paths += [(f['previous_filename'], 'removed') for f in files if f.get('previous_filename')]
+              touched = sorted({p for p, status in paths if protected(p, status)})
+              if not touched:
+                  return []
+              label = 'reviewed-controls'
+              if not (event['action'] == 'labeled'
+                      and event.get('label', {}).get('name') == label
+                      and permission in {'admin', 'maintain', 'write'}
+                      and attempt == '1'
+                      and any(v['name'] == label for v in current['labels'])):
+                  raise RuntimeError('Protected definitions changed: ' + json.dumps(touched)
+                                     + '. A maintainer with write access must review this revision and remove/reapply reviewed-controls. Old labels and reruns do not approve changes.')
+              return touched
+
+          def api(path, paginate=False):
+              args = ['gh', 'api', path]
+              if paginate:
+                  args += ['--paginate', '--slurp']
+              return json.loads(subprocess.check_output(args))
+
+          def main():
+              with open(os.environ['GITHUB_EVENT_PATH']) as source:
+                  event = json.load(source)
+              repo = os.environ['GITHUB_REPOSITORY']
+              endpoint = f"repos/{repo}/pulls/{int(event['number'])}"
+              current = api(endpoint)
+              pages = api(endpoint + '/files?per_page=100', paginate=True)
+              files = [entry for page in pages for entry in page]
+              permission = None
+              if event['action'] == 'labeled' and event.get('label', {}).get('name') == 'reviewed-controls':
+                  from urllib.parse import quote
+                  sender = quote(event['sender']['login'], safe='')
+                  permission = api(f'repos/{repo}/collaborators/{sender}/permission')['permission']
+              touched = evaluate(event, current, files, permission, os.environ['GITHUB_RUN_ATTEMPT'])
+              # Fail if a push, base change, or label removal raced the queries.
+              evaluate(event, api(endpoint), files, permission, os.environ['GITHUB_RUN_ATTEMPT'])
+              print('PASS: maintainer reviewed controls for this revision' if touched else 'PASS: no control changes')
+
+          if __name__ == '__main__':
+              main()
+          PY

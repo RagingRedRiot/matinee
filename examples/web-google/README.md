@@ -15,7 +15,7 @@ target/release/matinee record examples/web-google/demo.toml
 Firefox, network access, and `pasta` (from the `passt` package) are
 required. This storyboard sets `[session] network = true`, which connects the
 session to the outside through pasta while keeping Matinee's isolation; see
-[Recording a webpage](../../README.md#recording-a-webpage). `launch.sh` creates a
+[Recording a webpage](../../docs/web.md). `launch.sh` creates a
 disposable Firefox profile in the session to suppress
 first-run prompts and expose page controls through AT-SPI; it never reads your
 normal browser profile.

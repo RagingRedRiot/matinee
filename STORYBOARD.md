@@ -110,7 +110,7 @@ with movement. Review legibility at the actual display width.
 `matinee record` discovers storyboards recursively. It validates all files and
 checks output collisions before recording. Choose explicit story paths when
 a folder also contains experimental fixtures or needs unavailable apps.
-Use the [release review recipe](RELEASE.md) for side-by-side baseline artifacts.
+Use the [review recipe](CONTRIBUTING.md#reviewing-recordings) for side-by-side baseline artifacts.
 
 For diagnosis, `matinee run demo.toml --artifacts target/assertions` and
 `matinee record demo.toml --artifacts target/assertions` save a PNG for each

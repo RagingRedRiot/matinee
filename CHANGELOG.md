@@ -38,7 +38,7 @@ one format, with seeded state, checked command status, and observable assertions
 Source builds require Rust 1.87 or newer. The locked font dependency does not
 compile with the previously advertised 1.85 minimum. First-release validation
 is Linux x86_64; other architectures and toolkit/theme combinations need their
-own evidence. See [SUPPORT.md](SUPPORT.md) and [RELEASE.md](RELEASE.md).
+own evidence. See [SUPPORT.md](SUPPORT.md).
 
 The first release is source-only. In-process drivers, video output, prebuilt
 binary packages, and Cargo registry publication are deferred. Time remains

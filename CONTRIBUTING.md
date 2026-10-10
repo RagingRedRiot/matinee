@@ -25,7 +25,8 @@ small change.
 
 ## Reporting bugs
 
-Include the commit you built, your Linux distribution, and whether you ran with
+Include the output of `matinee --version` (or the commit you built from
+source), your Linux distribution, and whether you ran with
 `--no-isolation`. For a GUI story, include the app and toolkit versions and
 whether the app runs on Wayland or under Xwayland (`x11 = true`).
 

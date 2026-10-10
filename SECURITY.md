@@ -9,8 +9,9 @@ maintainers have assessed the report.
 
 Please include:
 
-- The commit you built, your Linux distribution and kernel, and whether
-  unprivileged user namespaces are restricted on that host.
+- The output of `matinee --version` or the commit you built, your Linux
+  distribution and kernel, and whether unprivileged user namespaces are
+  restricted on that host.
 - A minimal storyboard that reproduces the problem, and any `[session]` options
   it uses, such as `mounts` or `network`.
 - What appeared in the session or recording, what you expected to stay out, and

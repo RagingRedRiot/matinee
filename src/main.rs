@@ -12,6 +12,7 @@ usage: matinee check <storyboard.toml>...
        matinee shell <storyboard.toml> [-- <command>...]
        matinee snapshot <storyboard.toml> <out.png> [-- <command>...]
        matinee probe <storyboard.toml> [--all] [-- <command>...]
+       matinee --version
 
 commands:
   check   read storyboards and report any mistakes, without running them
@@ -150,6 +151,10 @@ fn main() -> ExitCode {
         Some("snapshot") if args.len() == 3 => snapshot(&args[1], &args[2], &[]),
         Some("snapshot") if args.len() > 4 && args[3] == "--" => {
             snapshot(&args[1], &args[2], &args[4..])
+        }
+        Some("-V" | "--version") => {
+            println!("matinee {}", env!("CARGO_PKG_VERSION"));
+            ExitCode::SUCCESS
         }
         Some("-h" | "--help" | "help") => {
             println!("{USAGE}");

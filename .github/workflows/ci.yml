@@ -7,8 +7,10 @@ name: Story correctness and visual review
 # while every rule below holds:
 #
 #   - The token stays read-only, and checkouts never keep credentials.
-#   - No secrets at repository level. A future release workflow keeps its
-#     secrets in a protected environment that this workflow never names.
+#   - No secrets at repository level. The release workflows need none: they
+#     use their own token, and only on main, tags, and manual runs, never on
+#     a pull request. A secret a release needs later goes in a protected
+#     environment that this workflow never names.
 #   - No workflow in this repository restores an Actions cache. Untrusted code
 #     here runs in main's cache scope and can write entries there even without
 #     a cache step, so anything that restores one could be poisoned.

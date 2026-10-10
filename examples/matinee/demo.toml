@@ -1,0 +1,29 @@
+# matinee demoing itself: a terminal runs the cued example with --view, and
+# the viewport above shows that run's session, with its camera outlined.
+# Build matinee in this checkout, and cued as the cued example says.
+
+[demo]
+output = "matinee"
+size = [1200, 860]
+
+[session]
+# This checkout's matinee, and cued's programs.
+path = ["../../target/release", "~/cued/target/release"]
+
+[terminal]
+# Placed, so the viewport window opened by the command gets the space above.
+position = "bottom"
+size = 150
+font_size = 16
+
+# Inside, `~` is the session's own home, so the cued example's
+# `~/cued/target/release` is linked to where cued is shown.
+[[seed]]
+run = "mkdir -p ~/cued/target && ln -s \"$(dirname \"$(command -v cued)\")\" ~/cued/target/release"
+
+[[scene]]
+steps = [
+  { hold = "1s" },
+  { run = "matinee run --view ../cued/demo.toml", timeout = "120s", hold = "2s" },
+  { expect = "all 10 steps passed" },
+]

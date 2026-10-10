@@ -16,7 +16,8 @@ usage: matinee check <storyboard.toml>...
 commands:
   check   read storyboards and report any mistakes, without running them
   run     perform a storyboard against the real apps and check every step,
-          without recording
+          without recording, in its first theme or the one MATINEE_THEME
+          names
   record  perform it once per theme and write a GIF of each, named after
           demo.output with -light or -dark added; with folders, or none for
           the current folder, record every storyboard found in them
@@ -35,10 +36,16 @@ options:
   --no-isolation  run, record, shell, snapshot, and probe on the host instead
           of in namespaces, for systems that do not allow unprivileged user
           namespaces; commands and apps still get a fresh home, environment,
-          display, and buses, but can read your files and use the network";
+          display, and buses, but can read your files and use the network
+  --view  with run or record, show the session in a window on your Wayland
+          desktop as it runs, with the camera's view outlined and the
+          pointer, but not captions, click ripples, or key badges; the run
+          never waits for the window";
 
 /// Set by `--no-isolation`: run stories on the host, without namespaces.
 static NO_ISOLATION: AtomicBool = AtomicBool::new(false);
+/// Set by `--view`: show the session in a window while it runs.
+static VIEW: AtomicBool = AtomicBool::new(false);
 static ARTIFACTS: OnceLock<PathBuf> = OnceLock::new();
 
 /// The boundary a command runs `story` in, isolated unless asked not to be.
@@ -63,7 +70,7 @@ fn main() -> ExitCode {
         args.drain(at..at + 2);
         if !matches!(
             args.iter()
-                .find(|a| a.as_str() != "--no-isolation")
+                .find(|a| !matches!(a.as_str(), "--no-isolation" | "--view"))
                 .map(String::as_str),
             Some("run" | "record")
         ) {
@@ -98,7 +105,16 @@ fn main() -> ExitCode {
              environment, but can read your files and use the network"
         );
     }
-    match args.first().map(String::as_str) {
+    let end = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    if let Some(at) = args[..end].iter().position(|a| a == "--view") {
+        args.remove(at);
+        if !matches!(args.first().map(String::as_str), Some("run" | "record")) {
+            eprintln!("matinee: --view applies to run and record\n{USAGE}");
+            return ExitCode::from(2);
+        }
+        VIEW.store(true, Ordering::Relaxed);
+    }
+    let code = match args.first().map(String::as_str) {
         Some("check") if args.len() > 1 => check(args[1..].iter().map(PathBuf::from)),
         Some("run") if args.len() == 2 => run(&args[1]),
         Some("record") => record(&args[1..]),
@@ -130,7 +146,27 @@ fn main() -> ExitCode {
             eprintln!("{USAGE}");
             ExitCode::from(2)
         }
+    };
+    matinee::viewport::close();
+    code
+}
+
+/// Open the viewport window for `stories` if `--view` asked for one, with
+/// room for the largest of their frames.
+fn open_viewport(stories: &[Story]) -> std::io::Result<()> {
+    if !VIEW.load(Ordering::Relaxed) {
+        return Ok(());
     }
+    let pixels = stories
+        .iter()
+        .map(|s| {
+            let [w, h] = s.demo.size.map(|n| (n * s.demo.scale) as usize);
+            w * h
+        })
+        .max()
+        .unwrap_or(0);
+    let [w, h] = stories[0].demo.size;
+    matinee::viewport::open(pixels, (w, h))
 }
 
 /// Assertion and failure images are written inside the same session as the
@@ -466,8 +502,18 @@ fn run(path: &str) -> ExitCode {
         eprintln!("matinee: {}: {e}", work.display());
         return ExitCode::FAILURE;
     }
-    // The story is the same in every theme, so one is enough to check it.
-    let theme = story.demo.themes[0];
+    // The story is the same in every theme, so one is enough to check it:
+    // the first, or the one a matinee session around this run is recording.
+    let theme = std::env::var("MATINEE_THEME")
+        .ok()
+        .and_then(|name| story.demo.themes.iter().find(|t| t.name() == name))
+        .copied()
+        .unwrap_or(story.demo.themes[0]);
+    if let Err(e) = open_viewport(std::slice::from_ref(&story)) {
+        let _ = std::fs::remove_dir_all(&work);
+        eprintln!("matinee: {e}");
+        return ExitCode::FAILURE;
+    }
     let result = boundary_for(&story, &work).and_then(|boundary| {
         boundary.run(|| {
             let performed = Session::start(&boundary, &story, theme)
@@ -572,6 +618,10 @@ fn record(targets: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
         outputs.push((output, path));
+    }
+    if let Err(e) = open_viewport(&stories) {
+        eprintln!("matinee: {e}");
+        return ExitCode::FAILURE;
     }
 
     if let ([path], [story]) = (&paths[..], &stories[..]) {

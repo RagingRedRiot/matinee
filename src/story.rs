@@ -37,6 +37,10 @@ pub struct TerminalPane {
     pub size: Option<u32>,
     /// Text size in points.
     pub font_size: f32,
+    /// Whether the pane leaves the rest of the screen to windows even when
+    /// the story launches no app, for windows its commands open. Set when
+    /// the storyboard gives the pane a position or size.
+    pub leaves_room: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -683,6 +687,7 @@ impl RawStory {
             position: t.position.unwrap_or(PanePosition::Bottom),
             size: t.size,
             font_size: t.font_size.unwrap_or(15.0),
+            leaves_room: t.position.is_some() || t.size.is_some(),
         };
         if !(6.0..=72.0).contains(&terminal.font_size) {
             return Err("terminal.font_size must be from 6 to 72".into());

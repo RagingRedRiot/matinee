@@ -22,3 +22,4 @@ pub mod runner;
 pub mod session;
 pub mod story;
 pub mod terminal;
+pub mod viewport;

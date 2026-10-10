@@ -21,6 +21,7 @@ from run to run.
 matinee record demo.toml        # perform the demo and write a GIF per theme
 matinee record                  # record every storyboard under this folder
 matinee run demo.toml           # perform it and check every step, without recording
+matinee run --view demo.toml    # the same, watching the session and camera in a window
 matinee check demo.toml         # read the storyboard and report mistakes, without running it
 matinee probe demo.toml         # list the windows and what steps can target in them
 matinee snapshot demo.toml shot.png   # a picture of the screen once it settles
@@ -46,7 +47,7 @@ Rust 1.87 or newer to build, and Linux with unprivileged user namespaces (on Ubu
 `kernel.apparmor_restrict_unprivileged_userns`), plus what any desktop that
 runs GTK or Qt already has: `dbus-daemon`, at-spi2-core, libpixman, and
 libxkbcommon. Stories that opt into network access also need `pasta`, from
-the `passt` package, and apps launched with `x11 = true` need Xwayland. Apps that use OpenGL fall back to Mesa's software
+the `passt` package, and apps launched with `x11 = true` need Xwayland. Apps that use OpenGL get Mesa's software
 renderer. matinee runs its own compositor, so it needs no desktop session or
 GPU.
 Where user namespaces are not allowed, such as some CI runners,
@@ -177,12 +178,15 @@ by points.
   after panning.
 - [`cued`](examples/cued/demo.toml): cued's status window following a release
   pipeline as a graph, with a loop, a rollback, and a success.
+- [`matinee`](examples/matinee/demo.toml): matinee demoing itself: a terminal
+  runs the cued example with `--view`, and the viewport shows that run with its
+  camera outlined.
 - [`web-google`](examples/web-google/demo.toml): a live Google search recorded
   as a page-only demo. The included launcher uses Firefox; Chrome, Vivaldi,
   and Brave were also tested. See its [setup notes](examples/web-google/README.md).
 
-The callboard and cued examples need those projects built in checkouts beside
-this one.
+The callboard, cued, and matinee examples need those projects built in
+checkouts beside this one.
 
 ## Read next
 

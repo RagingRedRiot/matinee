@@ -49,6 +49,7 @@ pub struct Session<'a> {
     artifacts: bool,
     /// What recordings show of the screen.
     pub camera: Camera,
+    theme: Theme,
 }
 
 impl<'a> Session<'a> {
@@ -77,7 +78,10 @@ impl<'a> Session<'a> {
         let [w, h] = story.demo.size.map(|n| n as f32);
         let terminal = if story.has_terminal() {
             let pane = &story.terminal;
-            let rect = match (story.launches.is_empty(), pane.position) {
+            // A terminal-only story gets the whole screen unless its pane
+            // was placed, leaving room for windows its commands open.
+            let whole = story.launches.is_empty() && !pane.leaves_room;
+            let rect = match (whole, pane.position) {
                 (true, _) => (0.0, 0.0, w, h),
                 (false, PanePosition::Bottom) => {
                     let size = pane.size.map_or((h * 0.35).round(), |n| n as f32);
@@ -93,7 +97,7 @@ impl<'a> Session<'a> {
             let pane = Pane::new(rect, story.terminal.font_size, theme);
             let (rows, cols) = pane.grid();
             Some((
-                Terminal::start(boundary, rows, cols, &app_env(&buses))?,
+                Terminal::start(boundary, rows, cols, &app_env(&buses, theme))?,
                 pane,
             ))
         } else {
@@ -124,6 +128,7 @@ impl<'a> Session<'a> {
                 story.camera.mode == CameraMode::Fixed,
                 story.camera.reading_width,
             ),
+            theme,
         })
     }
 
@@ -131,7 +136,7 @@ impl<'a> Session<'a> {
     /// steps as `name`.
     /// A leading `~/` in `program` means the session's home folder.
     pub fn spawn(&mut self, name: &str, program: &str, args: &[String]) -> io::Result<()> {
-        let env = owned(app_env(&self.buses));
+        let env = owned(app_env(&self.buses, self.theme));
         self.spawn_with(name, program, args, env)
     }
 
@@ -141,7 +146,7 @@ impl<'a> Session<'a> {
             .x11_display
             .clone()
             .ok_or_else(|| io::Error::other("Xwayland is not running"))?;
-        let mut env = owned(x11_env(&self.buses));
+        let mut env = owned(x11_env(&self.buses, self.theme));
         env.push(("DISPLAY".into(), display));
         self.spawn_with(name, program, args, env)
     }
@@ -189,7 +194,7 @@ impl<'a> Session<'a> {
                 .boundary
                 .command("bash")
                 .args(["-c", &seed.run])
-                .envs(app_env(&self.buses))
+                .envs(app_env(&self.buses, self.theme))
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
@@ -352,12 +357,13 @@ impl<'a> Session<'a> {
         self.frames += 1;
         let frame = self.current_frame()?;
         self.camera.step();
+        let pointer = self
+            .pointer_shown
+            .then(|| self.compositor.pointer_location());
+        crate::viewport::publish(&frame, self.camera.view(), pointer, self.scale);
         if let Some(recording) = &mut self.recording {
             let size = (self.size[0] as f64, self.size[1] as f64);
-            let pointer = self.pointer_shown.then(|| {
-                self.camera
-                    .to_output(self.compositor.pointer_location(), size)
-            });
+            let pointer = pointer.map(|at| self.camera.to_output(at, size));
             recording.add(&frame, self.camera.view(), pointer);
         }
         Ok(frame)
@@ -479,7 +485,7 @@ impl Drop for Session<'_> {
 
 /// Environment for programs in the session: the display, the buses, and
 /// the settings that make toolkits use them.
-fn app_env(buses: &Buses) -> Vec<(&str, &str)> {
+fn app_env(buses: &Buses, theme: Theme) -> Vec<(&str, &str)> {
     let mut env = vec![
         ("WAYLAND_DISPLAY", DISPLAY),
         ("XDG_SESSION_TYPE", "wayland"),
@@ -490,6 +496,12 @@ fn app_env(buses: &Buses) -> Vec<(&str, &str)> {
         ("ELECTRON_OZONE_PLATFORM_HINT", "wayland"),
         // GTK's own settings come from the keyfile written at start.
         ("GSETTINGS_BACKEND", "keyfile"),
+        // The session has no GPU, so OpenGL ends up in Mesa's software
+        // renderer anyway; going straight there skips the failed hardware
+        // probes and the warnings they print.
+        ("LIBGL_ALWAYS_SOFTWARE", "1"),
+        // The theme being recorded, so a matinee run inside follows it.
+        ("MATINEE_THEME", theme.name()),
     ];
     env.extend(buses.env());
     env
@@ -504,13 +516,15 @@ fn owned(env: Vec<(&str, &str)>) -> Vec<(String, String)> {
 /// Environment for X11 apps: the buses and settings, without the Wayland
 /// display, so toolkits that support both use X11. `DISPLAY` is added by
 /// the caller.
-fn x11_env(buses: &Buses) -> Vec<(&str, &str)> {
+fn x11_env(buses: &Buses, theme: Theme) -> Vec<(&str, &str)> {
     let mut env = vec![
         ("XDG_SESSION_TYPE", "x11"),
         ("GDK_BACKEND", "x11"),
         ("QT_QPA_PLATFORM", "xcb"),
         ("SDL_VIDEODRIVER", "x11"),
         ("GSETTINGS_BACKEND", "keyfile"),
+        ("LIBGL_ALWAYS_SOFTWARE", "1"),
+        ("MATINEE_THEME", theme.name()),
     ];
     env.extend(buses.env());
     env

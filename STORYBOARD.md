@@ -93,7 +93,9 @@ Coordinates can include a `window` selector. Captions, pointer ripples, and
 key badges are drawn at output resolution after camera cropping.
 
 `[terminal]` supports `position = "bottom"` or `"right"`, `size`, and
-`font_size`. `[demo]` also supports `scale`, `fps`, and `lossy` (6 by default,
+`font_size`. A story that launches no app gives the terminal the whole
+screen, unless it sets `position` or `size`: then the pane takes only that
+part, and the rest is left for windows that its commands open. `[demo]` also supports `scale`, `fps`, and `lossy` (6 by default,
 0 for exact LZW color handling; GIF palette quantization still applies).
 Recording prints each scene's duration and encoded size, including camera
 movement cost, and warns above 2 MiB per theme with a fixed camera or 5 MiB
@@ -110,3 +112,19 @@ successful `expect` or `wait_for` and a `failure.png` if the running story fails
 come from that session without advancing its timeline or relaunching the app.
 They show the full session at capture resolution and are grouped by story,
 theme, and invocation so older failures cannot masquerade as new results.
+
+To watch a story as it runs, add `--view` to `run` or `record`. A window on
+your Wayland desktop shows the whole session, with the camera's view outlined
+and the rest dimmed, so you can see where the camera goes and when. The
+pointer shows once a step has used it, as in recordings. Captions, click
+ripples, and key badges do not: recordings draw them when the GIF is
+written, after the run. The window lives outside the isolation boundary:
+matinee copies each frame out to it, and nothing inside the session can
+reach your desktop. The session never waits for the window, so watching does
+not change how a story runs or what is recorded. Closing the window leaves
+the run going.
+
+`matinee run` performs a story in its first theme. Programs in a matinee
+session see the theme being recorded in `MATINEE_THEME`, and `run` uses that
+theme when the story has it, so a run recorded inside another story matches
+the take it appears in.

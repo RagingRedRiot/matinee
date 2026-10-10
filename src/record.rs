@@ -501,23 +501,29 @@ impl Recording {
         if !shown.is_empty() {
             self.painter.draw(&mut pixels, shown, &self.events);
         }
-        let Some((px, py)) = pointer else {
-            return pixels;
-        };
-        for (dy, row) in ARROW.iter().enumerate() {
-            for (dx, c) in row.chars().enumerate() {
-                let color = match c {
-                    'X' => 0x000000,
-                    '.' => 0xffffff,
-                    _ => continue,
-                };
-                let (x, y) = (px + dx as i32, py + dy as i32);
-                if x >= 0 && y >= 0 && (x as usize) < self.width && (y as usize) < self.height {
-                    pixels[y as usize * self.width + x as usize] = color;
-                }
-            }
+        if let Some(at) = pointer {
+            draw_pointer(&mut pixels, (self.width, self.height), at, 0);
         }
         pixels
+    }
+}
+
+/// Draw the pointer with its tip at `at` onto `pixels`, `size` wide and
+/// high, with `alpha` in each pixel's top byte.
+pub fn draw_pointer(pixels: &mut [u32], size: (usize, usize), at: (i32, i32), alpha: u32) {
+    let (width, height) = size;
+    for (dy, row) in ARROW.iter().enumerate() {
+        for (dx, c) in row.chars().enumerate() {
+            let color = match c {
+                'X' => 0x000000,
+                '.' => 0xffffff,
+                _ => continue,
+            };
+            let (x, y) = (at.0 + dx as i32, at.1 + dy as i32);
+            if x >= 0 && y >= 0 && (x as usize) < width && (y as usize) < height {
+                pixels[y as usize * width + x as usize] = alpha | color;
+            }
+        }
     }
 }
 

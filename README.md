@@ -7,7 +7,7 @@
 
 <p align="center">
   <b>README demos that keep up with your app.</b><br>
-  Write the demo once as a script. matinee performs it against the real program, with seeded data and checked steps,<br>
+  Write the demo once as a script. matinee performs it against the real program, with seeded data and checked steps,
   and records light and dark GIFs with a camera that follows the action. Terminals, desktop apps, or both, on Linux.
 </p>
 
@@ -186,8 +186,9 @@ up as a safety net.
 | [Storyboards](STORYBOARD.md) | Writing and checking a demo: sessions, launches, steps, assertions, the camera, and output |
 | [Web pages](docs/web.md) | Recording a live site through a browser, with tested launch flags for Firefox, Chrome, Vivaldi, and Brave |
 | [X11 apps](docs/x11.md) | Tk, Motif, and Qt apps through Xwayland, and Qt 5 accessibility on Wayland |
+| [Agent skill](skills/matinee/SKILL.md) | Teaches an AI agent to write storyboards and run the check, probe, run, and record loop |
 | [Support](SUPPORT.md) | Which toolkits and themes are verified, and the evidence behind each |
-| [Vision](VISION.md) | Philosophy, goals, and the plan |
+| [Vision](VISION.md) | Philosophy, goals, and what comes later |
 | [Build decisions](BUILD-DECISIONS.md) | Working contracts, experiment results, and the architecture |
 
 ## Status

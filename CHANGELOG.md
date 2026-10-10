@@ -1,6 +1,6 @@
 # Release notes
 
-## 0.1.0 — unreleased draft
+## 0.1.0
 
 Matinee performs versioned storyboard files against real Linux programs and
 records light and dark GIFs for READMEs. Terminal, GUI, and mixed stories share
@@ -34,12 +34,11 @@ one format, with seeded state, checked command status, and observable assertions
 - OpenGL apps go straight to Mesa's software renderer instead of probing for a
   GPU the session does not have, so runs no longer print EGL and Zink warnings.
   With `--no-isolation`, apps also render in software rather than on the host GPU.
+- `matinee --version` prints the version, for bug reports.
 
-Source builds require Rust 1.87 or newer. The locked font dependency does not
-compile with the previously advertised 1.85 minimum. First-release validation
-is Linux x86_64; other architectures and toolkit/theme combinations need their
-own evidence. See [SUPPORT.md](SUPPORT.md).
+The release includes a prebuilt binary for x86_64 Linux with glibc 2.35 or
+newer, and source builds require Rust 1.87 or newer. Other architectures and
+toolkit/theme combinations need their own evidence; see [SUPPORT.md](SUPPORT.md).
 
-The first release is source-only. In-process drivers, video output, prebuilt
-binary packages, and Cargo registry publication are deferred. Time remains
-live, and byte-identical GIFs across machines are not a promise.
+In-process drivers, video output, and Cargo registry publication are deferred.
+Time remains live, and byte-identical GIFs across machines are not a promise.

@@ -68,11 +68,22 @@ and font rendering vary from run to run.
 
 ## Install
 
-matinee builds from source with Rust 1.87 or newer, and runs on Linux with
-unprivileged user namespaces (on Ubuntu, see
+matinee runs on Linux with unprivileged user namespaces (on Ubuntu, see
 `kernel.apparmor_restrict_unprivileged_userns`). It also needs what any desktop
 that runs GTK or Qt already has: `dbus-daemon`, at-spi2-core, libpixman, and
 libxkbcommon.
+
+Download the latest release for x86_64 Linux (glibc 2.35 or newer):
+
+```sh
+base=https://github.com/RagingRedRiot/matinee/releases/latest/download
+curl -fLO "$base/matinee-x86_64-linux.tar.gz" -O "$base/matinee-x86_64-linux.tar.gz.sha256"
+sha256sum -c matinee-x86_64-linux.tar.gz.sha256
+tar -xzf matinee-x86_64-linux.tar.gz matinee
+install -D -m 755 -t ~/.local/bin matinee
+```
+
+Or build from source with Rust 1.87 or newer:
 
 ```sh
 git clone https://github.com/RagingRedRiot/matinee
@@ -193,9 +204,9 @@ up as a safety net.
 
 ## Status
 
-The first release, 0.1.0, is being prepared: source-only, with Linux x86_64 as
-the validated platform. See the [draft release notes](CHANGELOG.md). Video output, prebuilt binaries, and crates.io
-publication are deferred.
+Linux x86_64 is the validated platform. See the [release notes](CHANGELOG.md)
+for what each version changed. Video output and crates.io publication are
+deferred.
 
 ## Contributing
 
@@ -222,6 +233,15 @@ workflows, scripts, build files, the isolation boundary, or existing tests
 until a maintainer applies the `reviewed-controls` label. The
 [contribution guide](CONTRIBUTING.md#reviewing-recordings) covers reviewing
 recordings locally.
+
+Releases are cut from the Actions tab, and pull requests never change the
+version. Notes for the next release collect under `## Unreleased` in
+[CHANGELOG.md](CHANGELOG.md). **Prepare release** bumps the version to the next
+patch, minor, or major on a `release/vX.Y.Z` branch, dates those notes, and
+links to a pull request for it. Merging that pull request makes **Publish
+release** tag the commit and start the release build, which checks that the
+binary performs a story in a real isolated session before attaching it to a
+GitHub release with the notes.
 
 ## License
 

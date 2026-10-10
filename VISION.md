@@ -52,7 +52,8 @@ matinee should record:
 
 ## The storyboard
 
-A sketch of the format, to be refined by building it:
+A storyboard for a callboard demo looks like this. [STORYBOARD.md](STORYBOARD.md)
+documents every field:
 
 ```toml
 [demo]
@@ -119,9 +120,8 @@ steps = [
 - **Capture and encode:** frames from the compositor, deduplicated, then
   a GIF (palette per clip, changed rectangles only, holds merged into long
   frames). Video and a poster are possible later outputs.
-- **In-process driver (deferred):** for apps that can link a test harness (egui with
-  egui_kittest, as in the prototype), a precise mode with no compositor at
-  all.
+- **In-process driver (later):** for apps that can link a test harness, such
+  as egui with egui_kittest, a precise mode with no compositor at all.
 
 ## The camera
 
@@ -154,39 +154,21 @@ not wall-clock time, so the same story produces the same camera path:
 
 Zooming changes every pixel of a frame, which GIF stores expensively. Keep
 camera moves short and few, and measure whether the result is legible at
-README width. matinee should report GIF size per scene so camera behavior
-can be tuned against a concrete size budget. Video is a possible later
-escape hatch, not a requirement for the first release.
+README width. matinee reports GIF size per scene, so camera behavior can be
+tuned against a concrete size budget. Video is a possible later
+escape hatch.
 
-## Plan
+## Later
 
-The core runner, storyboard authoring tools, external GUI and terminal drivers,
-frame pipeline, camera, and encoder below are implemented. The CI recipe now
-lives in [.github/workflows/ci.yml](.github/workflows/ci.yml); its hosted run
-still needs confirmation. The in-process driver is deferred beyond the first
-release. The current remaining gates are tracked in [RELEASE.md](RELEASE.md),
-with support evidence in [SUPPORT.md](SUPPORT.md).
+The runner, authoring commands, terminal and GUI drivers, camera, and encoder
+are built, and [CI](.github/workflows/ci.yml) fails on broken stories while
+saving visual changes for review. Still ahead:
 
-The original implementation order was:
-
-1. **Carry the proven contracts into the runner.** Use callboard's GitHub GIFs
-   as the output reference. Reproduce the tested isolation boundary with the
-   chosen implementation and treat story correctness as the hard CI gate;
-   attach visual changes for review.
-2. **One complete story.** Seed before launch, run a real terminal command,
-   check its exit status, select one GUI target, assert the result, and record
-   it with both fixed and moving camera views.
-3. **Storyboard and authoring.** Make target context, windows, timeouts,
-   assertions, fixture paths, themes, and useful failure diagnostics part of
-   one format. Let `probe` show what a writer can target.
-4. **Drivers.** Support a terminal-only story, an in-process driver where an
-   app can link one, and a headless Linux session for external GUI apps.
-5. **Frame pipeline and camera.** Supersampled capture, calm automatic and
-   explicit framing, overlays after cropping, frame deduplication, GIF
-   output, and per-scene size reporting. Decide encoder details using
-   moving-camera stories.
-6. **CI recipe.** Re-record on release, fail on broken stories, and present
-   visual changes for review.
+- **More toolkits with evidence.** Support grows as each toolkit and theme is
+  checked against real apps; [SUPPORT.md](SUPPORT.md) tracks what is verified.
+- **The in-process driver,** for apps that can link a test harness.
+- **Video and a still poster,** if a story cannot stay small enough as a GIF,
+  or for readers who prefer reduced motion.
 
 ## Not goals
 

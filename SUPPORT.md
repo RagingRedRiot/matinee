@@ -14,7 +14,7 @@ not just its toolkit.
 | Qt 5, Wayland | Build dependent; Ubuntu 24.04's Qt lacks the accessibility-bus patch | Not verified | Existing probe findings; coordinate fallback is available |
 | GTK 3, Qt 6, Electron | Experimental; validate the particular app | Not verified | No committed automated toolkit coverage yet |
 | Firefox, Chrome, Vivaldi, Brave, Wayland | Named page controls where the browser exposes them; point fallback | Site/browser dependent | Manual Google story trials; not a CI gate |
-| callboard and cued | Mixed terminal and semantic GUI stories | Both checked locally | Real-app examples rerun with fixed and moving cameras; binary identifiers in `RELEASE.md` |
+| callboard and cued | Mixed terminal and semantic GUI stories | Both checked locally | Real-app examples rerun with fixed and moving cameras |
 
 Three levels of GUI use apply:
 

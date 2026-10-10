@@ -3,7 +3,7 @@ name = "matinee"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.87"
-description = "Scripted, reproducible demos of your software, recorded from the real thing"
+description = "README demos that keep up with your app"
 license = "MIT"
 publish = false
 

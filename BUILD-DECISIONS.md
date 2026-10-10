@@ -1,8 +1,9 @@
-# Decisions before building matinee
+# matinee: build decisions
 
-These are working product contracts and tests for the first implementation.
-They are based on local experiments, not on adopting the tools used to run
-those experiments. The prototype source stays outside version control.
+The contracts matinee keeps, the experiments behind them, and how it is built.
+The experiments ran on an early prototype that is not part of this repository,
+and their measurements come from one machine. They informed the design; the
+tools used to run them were not adopted.
 
 ## What a successful run means
 
@@ -17,16 +18,14 @@ canned output, so a demo of `gh`-fed data needs no live account or service.
 This staging is declared per step in the storyboard. The demoed program
 itself is never staged: its GUI or terminal result comes from a real run.
 
-The first reproducibility promise is **the same observable story** under a
+The reproducibility promise is **the same observable story** under a
 pinned app build, fixtures, theme, locale, screen geometry, and fonts. The
 clock is deliberately left running: live labels such as "updated 3s ago" are
-part of what a demo shows.
-We will measure visual stability separately. Byte-identical GIFs across
-machines are not a release promise until the app clock, animation scheduling,
-terminal rendering, compositor frames, and encoders are controlled and tested.
-CI should fail on story correctness; a visual difference should produce a
-reviewable artifact rather than being silently accepted or automatically
-treated as an application failure.
+part of what a demo shows. Byte-identical GIFs across machines are not
+promised; that would need the app clock, animation scheduling, terminal
+rendering, compositor frames, and encoders all controlled. CI fails on story
+correctness, and a visual difference produces a reviewable artifact rather
+than being silently accepted or treated as an application failure.
 
 ## What the experiments show
 
@@ -43,9 +42,9 @@ frames matched at 70 of 72 indices, but the GIFs still differed: 19,710,
 the GUI matched at 71 indices, while the final frames matched at only 35.
 Those GIFs were 112,426, 115,509, and 114,476 bytes and had different
 hashes. Camera easing and real-time sampling vary even when the app's resting
-state is stable. These are same-machine measurements; another machine remains
-untested. CI should check the observable story and save assertion stills and
-visual diffs for review, not require identical GIF hashes.
+state is stable. So CI checks the observable story and saves assertion
+stills and visual differences for review, rather than requiring identical GIF
+hashes.
 
 In a separate optimized comparison with the same story, a fixed view produced
 a 19 KB GIF and automatic 1.8× framing produced a 109 KB GIF. Capture lateness
@@ -74,8 +73,8 @@ isolated Qt palette profiles produced distinct light and dark output. The
 clock preload and Qt palette tool were experiment mechanisms, not selected
 matinee dependencies. The Qt clock fixture published only its accessibility
 application root, so its time/theme result is visual, not a semantic-control
-success. Other Qt apps had usable trees in earlier probes. Electron, egui,
-and other toolkit clocks/themes remain to be tested with real apps.
+success. Other Qt apps had usable trees in earlier probes. Other toolkits'
+themes are tracked in [SUPPORT.md](SUPPORT.md).
 
 One GTK action fixture completed focus and typing, drag and drop, scrolling to
 an initially offscreen row, a modal dialog, a second window, clipboard copy
@@ -91,13 +90,13 @@ coverage for each action.
 
 The offscreen row was still present in AT-SPI and initially had coordinates
 well beyond the 800×480 window. Without a visibility check, a semantic click
-could have gone to the wrong place. The prototype now rejects that action with
-an offscreen diagnostic; the same action succeeds after an explicit scroll.
+could have gone to the wrong place. matinee refuses a target outside its
+window and says to scroll it into view; the same action succeeds after an
+explicit scroll.
 
 ## Support boundary
 
-For the first release, distinguish these capabilities in `probe` output and
-story validation:
+`probe` output and story validation distinguish three kinds of control:
 
 1. **Semantic control:** an accessible target can be located uniquely by
    name, role, app, named ancestor, and window. This is the preferred mode.
@@ -108,11 +107,11 @@ story validation:
    its GUI cannot be clicked or asserted by meaning. Such scenes cannot claim
    a verified GUI result without another observable assertion.
 
-The tool should report which tier a story uses. It should not claim semantic
-control of every Linux toolkit: whether a tree exists depends on the app's
-build and settings.
+`check` reports which a story uses. matinee does not claim semantic control
+of every Linux toolkit: whether a tree exists depends on the app's build and
+settings.
 
-## Isolation contract to prove
+## Isolation contract
 
 The isolation exists so that personal and identifying details about the user
 and their machine cannot end up in a recording: host files, the home folder,
@@ -127,8 +126,7 @@ That was useful state isolation, not a containment boundary: apps could still
 access host paths, fixed socket locations, and some system services. Its
 per-process network namespaces also prevented terminal and GUI apps from
 talking over localhost. The current built-in boundary addresses these gaps and
-is covered by `tests/boundary.rs`; broader release validation remains tracked
-in [RELEASE.md](RELEASE.md).
+is covered by `tests/boundary.rs`, which CI runs on every change.
 
 A local feasibility experiment wrapped the **entire** runner and its children
 in one private user, mount, PID, and network boundary. A first version with a
@@ -169,10 +167,7 @@ forwarding address that pasta relays to the host's resolver, since that
 resolver often listens on the host's loopback. Other hosts, including those on
 the local network and the host's own non-loopback addresses, are reachable.
 
-Before release, repeat these checks with the chosen implementation and a
-broader set of host Unix sockets and system paths. Document explicit opt-ins
-for stories that need outside access. A temporary `HOME` alone must never be
-presented as full isolation.
+A temporary `HOME` alone must never be presented as full isolation.
 
 `--no-isolation` is that kind of opt-out, for systems that do not allow
 unprivileged user namespaces. It skips the namespaces only: the session,
@@ -183,13 +178,12 @@ the network are reachable.
 
 ## Output contract
 
-GIF is the primary output. The existing
-[callboard README](https://github.com/RagingRedRiot/callboard) uses `<picture>`
-with separate light and dark GIFs, each about 1.3 MB. Use that as the GitHub
-README pattern; no new hosting repository is needed to choose the format.
-Matinee should report GIF size per scene, set a practical per-story budget,
-and check legibility at README width. A particularly motion-heavy story may
-motivate optional video support later, but video playback is not a build gate.
+GIF is the primary output, as separate light and dark files for a README
+`<picture>` element, the pattern
+[callboard's README](https://github.com/RagingRedRiot/callboard) uses. matinee
+reports GIF size per scene against a practical budget, and legibility at README
+width is checked by eye. A particularly motion-heavy story may motivate
+optional video support later.
 `record` warns when a GIF is over budget: 2 MiB per theme with a still
 camera, and 5 MiB when the camera moves. Size alone is not a pass: the
 text acted on must remain legible at the width the recording is read at,
@@ -213,8 +207,7 @@ or as their own color where that continues a run; the palette is chosen by
 median cut and k-means from how long each color is on screen; and LZW
 compression may let a color move by up to 6 in any channel (`[demo] lossy`,
 0 for exact), which looked the same in side-by-side frames (at 12, streaks
-showed in flat light areas). The fixed-camera figure has not been measured again. `record`
-prints each scene's seconds and kilobytes, and how much of that came
+showed in flat light areas). `record` prints each scene's seconds and kilobytes, and how much of that came
 while the camera moved.
 
 Light and dark come from the session, not the app: matinee serves the desktop
@@ -222,8 +215,8 @@ portal's settings on the session bus (the `color-scheme` that libadwaita,
 GTK 4, and Qt 6 follow) and writes the same GNOME interface settings to a
 GSettings keyfile, which GTK reads outside a sandbox. Neither bus starts
 services on demand, so the session does not depend on what the host has
-installed. This put GTK 4 and libadwaita into both themes; GTK 3, Qt 5,
-Qt 6, and Electron still need checking. A terminal theme alone does not
+installed. This puts GTK 4 and libadwaita into both themes; GTK 3, Qt 5,
+Qt 6, and Electron still need checking (see [SUPPORT.md](SUPPORT.md)). A terminal theme alone does not
 change the GUI. Reduced-motion
 behavior can use a still poster where a host supports it, without blocking
 GIF output.
@@ -232,16 +225,13 @@ GIF output.
 
 The point of matinee is control over every stage of a recording, so the core
 pipeline is built into the binary rather than borrowed from external tools.
-The prototype's stand-ins (sway, ffmpeg, `bwrap`) are not runtime
-dependencies of the finished tool.
+The experiments used sway, ffmpeg, and `bwrap` as stand-ins; none of them is
+a runtime dependency.
 
-- **Compositor:** a headless Wayland compositor built into matinee. The
-  prototype already captures and injects input only through standard
-  wlroots protocols (screencopy, virtual pointer, virtual keyboard), so that
-  client code carries over. Owning the compositor also gives matinee control
-  of frame timing and output geometry.
-- **Isolation:** matinee creates the user, mount, PID, and network namespaces
-  itself, with the mount policy tested above.
+- **Compositor:** a headless Wayland compositor built into matinee. Owning
+  the compositor gives matinee control of frame timing and output geometry.
+- **Isolation:** matinee creates the user, mount, PID, network, IPC, and
+  hostname namespaces itself, with the mount policy described above.
 - **X11 apps:** Xwayland, started only when a launch sets `x11 = true`,
   with matinee as its window manager through smithay's X11 support. It is
   an optional runtime dependency, like pasta. X11 is chosen per launch,
@@ -270,24 +260,3 @@ dependencies of the finished tool.
   camera path, eased pointer motion, and capture schedule are planned on
   that timeline, so the same story yields the same camera path. Waiting for
   the app (window appearance, assertions, timeouts) still uses real time.
-
-The first slice may run on the stand-ins while these are built, but each
-stage sits behind its own module boundary so it can be replaced without
-reworking the runner.
-
-## First implementation slice
-
-Build one story through seeding, launch, real terminal command, checked exit
-code, unambiguous GUI action or assertion, camera, and a reviewable GIF.
-Keep a fixed-camera variant for size and timing comparisons. Use
-`probe` output to author selectors and include the available names, roles,
-windows, and nearby matches in failure messages.
-
-The prototype GTK fixture exercised focus, scrolling, drag, dialogs, a file
-picker, clipboard, and multiple windows. Repeat those actions on supported
-real apps; menus and toolkit-specific focus behavior still need stories.
-Check themes in each supported toolkit and repeat the visual-stability
-measurement on another machine. The chosen boundary is implemented and has
-local tests, including outside networking. The release CI recipe is written;
-its first hosted run remains to be confirmed. [RELEASE.md](RELEASE.md) is the
-current checklist rather than this original implementation plan.

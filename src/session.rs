@@ -38,6 +38,9 @@ pub struct Session<'a> {
     size: [u32; 2],
     scale: u32,
     recording: Option<Recording>,
+    /// The same frames with the camera held on the whole screen, when a
+    /// fixed-camera recording was asked for too.
+    fixed: Option<Recording>,
     /// The terminal pane, when the story has one.
     terminal: Option<(Terminal, Pane)>,
     /// Whether recordings draw the pointer: only once a step has used it.
@@ -49,6 +52,7 @@ pub struct Session<'a> {
     artifacts: bool,
     /// What recordings show of the screen.
     pub camera: Camera,
+    theme: Theme,
 }
 
 impl<'a> Session<'a> {
@@ -77,7 +81,10 @@ impl<'a> Session<'a> {
         let [w, h] = story.demo.size.map(|n| n as f32);
         let terminal = if story.has_terminal() {
             let pane = &story.terminal;
-            let rect = match (story.launches.is_empty(), pane.position) {
+            // A terminal-only story gets the whole screen unless its pane
+            // was placed, leaving room for windows its commands open.
+            let whole = story.launches.is_empty() && !pane.leaves_room;
+            let rect = match (whole, pane.position) {
                 (true, _) => (0.0, 0.0, w, h),
                 (false, PanePosition::Bottom) => {
                     let size = pane.size.map_or((h * 0.35).round(), |n| n as f32);
@@ -93,7 +100,7 @@ impl<'a> Session<'a> {
             let pane = Pane::new(rect, story.terminal.font_size, theme);
             let (rows, cols) = pane.grid();
             Some((
-                Terminal::start(boundary, rows, cols, &app_env(&buses))?,
+                Terminal::start(boundary, rows, cols, &app_env(&buses, theme))?,
                 pane,
             ))
         } else {
@@ -111,6 +118,7 @@ impl<'a> Session<'a> {
             size: story.demo.size,
             scale: story.demo.scale,
             recording: None,
+            fixed: None,
             terminal,
             pointer_shown: false,
             oversized: vec![],
@@ -124,6 +132,7 @@ impl<'a> Session<'a> {
                 story.camera.mode == CameraMode::Fixed,
                 story.camera.reading_width,
             ),
+            theme,
         })
     }
 
@@ -131,7 +140,7 @@ impl<'a> Session<'a> {
     /// steps as `name`.
     /// A leading `~/` in `program` means the session's home folder.
     pub fn spawn(&mut self, name: &str, program: &str, args: &[String]) -> io::Result<()> {
-        let env = owned(app_env(&self.buses));
+        let env = owned(app_env(&self.buses, self.theme));
         self.spawn_with(name, program, args, env)
     }
 
@@ -141,7 +150,7 @@ impl<'a> Session<'a> {
             .x11_display
             .clone()
             .ok_or_else(|| io::Error::other("Xwayland is not running"))?;
-        let mut env = owned(x11_env(&self.buses));
+        let mut env = owned(x11_env(&self.buses, self.theme));
         env.push(("DISPLAY".into(), display));
         self.spawn_with(name, program, args, env)
     }
@@ -189,7 +198,7 @@ impl<'a> Session<'a> {
                 .boundary
                 .command("bash")
                 .args(["-c", &seed.run])
-                .envs(app_env(&self.buses))
+                .envs(app_env(&self.buses, self.theme))
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
@@ -352,13 +361,19 @@ impl<'a> Session<'a> {
         self.frames += 1;
         let frame = self.current_frame()?;
         self.camera.step();
+        let pointer = self
+            .pointer_shown
+            .then(|| self.compositor.pointer_location());
+        crate::viewport::publish(&frame, self.camera.view(), pointer, self.scale);
+        let size = (self.size[0] as f64, self.size[1] as f64);
         if let Some(recording) = &mut self.recording {
-            let size = (self.size[0] as f64, self.size[1] as f64);
-            let pointer = self.pointer_shown.then(|| {
-                self.camera
-                    .to_output(self.compositor.pointer_location(), size)
-            });
+            let pointer = pointer.map(|at| self.camera.to_output(at, size));
             recording.add(&frame, self.camera.view(), pointer);
+        }
+        if let Some(fixed) = &mut self.fixed {
+            let whole = Rect::new(0.0, 0.0, size.0, size.1);
+            let pointer = pointer.map(|(x, y)| (x * size.0 / whole.w, y * size.1 / whole.h));
+            fixed.add(&frame, whole, pointer);
         }
         Ok(frame)
     }
@@ -400,49 +415,51 @@ impl<'a> Session<'a> {
         self.pointer_shown = true;
     }
 
-    /// Keep every frame from now on.
-    pub fn start_recording(&mut self) {
-        let mut recording = Recording::new(
-            self.size[0] as usize,
-            self.size[1] as usize,
-            self.scale as usize,
-        );
-        recording.set_pane(self.pane_rect());
-        recording.set_lossy(self.lossy);
-        self.recording = Some(recording);
+    /// Keep every frame from now on, and with `fixed_too`, keep the same
+    /// frames with the camera held on the whole screen as a second
+    /// recording.
+    pub fn start_recording(&mut self, fixed_too: bool) {
+        let (size, scale, pane, lossy) = (self.size, self.scale, self.pane_rect(), self.lossy);
+        let new = || {
+            let mut recording = Recording::new(size[0] as usize, size[1] as usize, scale as usize);
+            recording.set_pane(pane);
+            recording.set_lossy(lossy);
+            recording
+        };
+        self.recording = Some(new());
+        self.fixed = fixed_too.then(new);
+    }
+
+    /// The recordings being kept: the camera's, and the fixed one.
+    fn recordings(&mut self) -> impl Iterator<Item = &mut Recording> {
+        self.recording.iter_mut().chain(self.fixed.iter_mut())
     }
 
     /// Start a new part of the recording, for size reporting.
     pub fn mark_segment(&mut self, label: &str) {
-        if let Some(recording) = &mut self.recording {
-            recording.segment(label);
-        }
+        self.recordings().for_each(|r| r.segment(label));
     }
 
     /// Caption what is recorded from now on, or stop with `None`.
     pub fn caption(&mut self, text: Option<&str>) {
-        if let Some(recording) = &mut self.recording {
-            recording.caption(text);
-        }
+        self.recordings().for_each(|r| r.caption(text));
     }
 
     /// Mark a click in the recording, where the pointer is.
     pub fn mark_click(&mut self) {
-        if let Some(recording) = &mut self.recording {
-            recording.click();
-        }
+        self.recordings().for_each(|r| r.click());
     }
 
     /// Mark a key chord in the recording, to show on a badge.
     pub fn mark_key(&mut self, chord: &str) {
-        if let Some(recording) = &mut self.recording {
-            recording.key(chord);
-        }
+        self.recordings().for_each(|r| r.key(chord));
     }
 
-    /// Stop keeping frames and return what was kept.
-    pub fn stop_recording(&mut self) -> Option<Recording> {
-        self.recording.take()
+    /// Stop keeping frames and return what was kept: the recording, and
+    /// the fixed-camera one if it was asked for.
+    pub fn stop_recording(&mut self) -> Option<(Recording, Option<Recording>)> {
+        let recording = self.recording.take()?;
+        Some((recording, self.fixed.take()))
     }
 
     /// Run frames for `duration` of the timeline.
@@ -479,7 +496,7 @@ impl Drop for Session<'_> {
 
 /// Environment for programs in the session: the display, the buses, and
 /// the settings that make toolkits use them.
-fn app_env(buses: &Buses) -> Vec<(&str, &str)> {
+fn app_env(buses: &Buses, theme: Theme) -> Vec<(&str, &str)> {
     let mut env = vec![
         ("WAYLAND_DISPLAY", DISPLAY),
         ("XDG_SESSION_TYPE", "wayland"),
@@ -490,6 +507,12 @@ fn app_env(buses: &Buses) -> Vec<(&str, &str)> {
         ("ELECTRON_OZONE_PLATFORM_HINT", "wayland"),
         // GTK's own settings come from the keyfile written at start.
         ("GSETTINGS_BACKEND", "keyfile"),
+        // The session has no GPU, so OpenGL ends up in Mesa's software
+        // renderer anyway; going straight there skips the failed hardware
+        // probes and the warnings they print.
+        ("LIBGL_ALWAYS_SOFTWARE", "1"),
+        // The theme being recorded, so a matinee run inside follows it.
+        ("MATINEE_THEME", theme.name()),
     ];
     env.extend(buses.env());
     env
@@ -504,13 +527,15 @@ fn owned(env: Vec<(&str, &str)>) -> Vec<(String, String)> {
 /// Environment for X11 apps: the buses and settings, without the Wayland
 /// display, so toolkits that support both use X11. `DISPLAY` is added by
 /// the caller.
-fn x11_env(buses: &Buses) -> Vec<(&str, &str)> {
+fn x11_env(buses: &Buses, theme: Theme) -> Vec<(&str, &str)> {
     let mut env = vec![
         ("XDG_SESSION_TYPE", "x11"),
         ("GDK_BACKEND", "x11"),
         ("QT_QPA_PLATFORM", "xcb"),
         ("SDL_VIDEODRIVER", "x11"),
         ("GSETTINGS_BACKEND", "keyfile"),
+        ("LIBGL_ALWAYS_SOFTWARE", "1"),
+        ("MATINEE_THEME", theme.name()),
     ];
     env.extend(buses.env());
     env

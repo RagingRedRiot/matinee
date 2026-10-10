@@ -391,3 +391,23 @@ fn reading_width_and_lossy_can_be_set() {
             .contains("camera.reading_width")
     );
 }
+
+#[test]
+fn a_placed_pane_leaves_room_for_windows_without_a_launch() {
+    let story = |terminal: &str| {
+        Story::parse(
+            &format!(
+                "[demo]\noutput = \"demo\"\nsize = [800, 480]\n{terminal}\n\
+                 [[scene]]\nsteps = [{{ run = \"true\" }}]\n"
+            ),
+            PathBuf::from("tests"),
+        )
+        .unwrap()
+        .terminal
+        .leaves_room
+    };
+    assert!(!story(""), "terminal-only stories keep the whole screen");
+    assert!(!story("[terminal]\nfont_size = 18"));
+    assert!(story("[terminal]\nposition = \"right\""));
+    assert!(story("[terminal]\nsize = 200"));
+}

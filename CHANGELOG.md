@@ -22,6 +22,18 @@ one format, with seeded state, checked command status, and observable assertions
   correctness and saves recordings, stills, and visual differences for review.
 - Input pacing resumes normally after slow setup or rendering instead of rushing
   overdue frames and losing interactions such as GTK drops.
+- `--view` on `run` and `record` shows the session live in a window on a
+  Wayland desktop, with the camera's view outlined and the pointer. Captions,
+  click ripples, and key badges stay in the GIF only. Frames are copied out of
+  the boundary, so the desktop stays out of reach, and the run never waits for
+  the window.
+- `record --fixed-too` also writes a fixed-camera GIF of each theme from the
+  same run, for comparing the moving camera against the whole screen.
+- A story with no app can place its terminal pane with `position` or `size`,
+  leaving the rest of the screen for windows its commands open.
+- OpenGL apps go straight to Mesa's software renderer instead of probing for a
+  GPU the session does not have, so runs no longer print EGL and Zink warnings.
+  With `--no-isolation`, apps also render in software rather than on the host GPU.
 
 Source builds require Rust 1.87 or newer. The locked font dependency does not
 compile with the previously advertised 1.85 minimum. First-release validation

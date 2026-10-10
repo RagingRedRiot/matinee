@@ -27,6 +27,8 @@ one format, with seeded state, checked command status, and observable assertions
   click ripples, and key badges stay in the GIF only. Frames are copied out of
   the boundary, so the desktop stays out of reach, and the run never waits for
   the window.
+- `record --fixed-too` also writes a fixed-camera GIF of each theme from the
+  same run, for comparing the moving camera against the whole screen.
 - A story with no app can place its terminal pane with `position` or `size`,
   leaving the rest of the screen for windows its commands open.
 - OpenGL apps go straight to Mesa's software renderer instead of probing for a

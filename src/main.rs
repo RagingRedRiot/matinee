@@ -37,6 +37,8 @@ options:
           of in namespaces, for systems that do not allow unprivileged user
           namespaces; commands and apps still get a fresh home, environment,
           display, and buses, but can read your files and use the network
+  --fixed-too  with record, also write each GIF with the camera held on
+          the whole screen, from the same run, named with -fixed added
   --view  with run or record, show the session in a window on your Wayland
           desktop as it runs, with the camera's view outlined and the
           pointer, but not captions, click ripples, or key badges; the run
@@ -46,6 +48,8 @@ options:
 static NO_ISOLATION: AtomicBool = AtomicBool::new(false);
 /// Set by `--view`: show the session in a window while it runs.
 static VIEW: AtomicBool = AtomicBool::new(false);
+/// Set by `--fixed-too`: also write a fixed-camera GIF of each recording.
+static FIXED_TOO: AtomicBool = AtomicBool::new(false);
 static ARTIFACTS: OnceLock<PathBuf> = OnceLock::new();
 
 /// The boundary a command runs `story` in, isolated unless asked not to be.
@@ -70,7 +74,7 @@ fn main() -> ExitCode {
         args.drain(at..at + 2);
         if !matches!(
             args.iter()
-                .find(|a| !matches!(a.as_str(), "--no-isolation" | "--view"))
+                .find(|a| !matches!(a.as_str(), "--no-isolation" | "--view" | "--fixed-too"))
                 .map(String::as_str),
             Some("run" | "record")
         ) {
@@ -113,6 +117,15 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
         VIEW.store(true, Ordering::Relaxed);
+    }
+    let end = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    if let Some(at) = args[..end].iter().position(|a| a == "--fixed-too") {
+        args.remove(at);
+        if args.first().is_none_or(|c| c != "record") {
+            eprintln!("matinee: --fixed-too applies to record\n{USAGE}");
+            return ExitCode::from(2);
+        }
+        FIXED_TOO.store(true, Ordering::Relaxed);
     }
     let code = match args.first().map(String::as_str) {
         Some("check") if args.len() > 1 => check(args[1..].iter().map(PathBuf::from)),
@@ -653,6 +666,47 @@ fn record(targets: &[String]) -> ExitCode {
     }
 }
 
+/// Print what was written for the GIF called `name`, and warn when it is
+/// over its size budget.
+fn report(name: &str, steps: usize, written: &matinee::record::Written) {
+    println!(
+        "{name}: {steps} steps, {} frames, {:.1} s, {} KB",
+        written.frames,
+        written.seconds,
+        written.bytes / 1024
+    );
+    for part in &written.segments {
+        let camera = if part.camera_bytes > 0 {
+            format!(", {} KB while the camera moved", part.camera_bytes / 1024)
+        } else {
+            String::new()
+        };
+        println!(
+            "  {:>5.1} s {:>6} KB  {}{camera}",
+            part.seconds,
+            part.bytes / 1024,
+            part.label
+        );
+    }
+    let budget = if written.camera_moved {
+        matinee::record::CAMERA_BUDGET
+    } else {
+        matinee::record::BUDGET
+    };
+    if written.bytes > budget {
+        eprintln!(
+            "matinee: warning: the {name} GIF is {} KB, over its {} KB budget{}",
+            written.bytes / 1024,
+            budget / 1024,
+            if written.camera_moved {
+                " for a moving camera"
+            } else {
+                ""
+            }
+        );
+    }
+}
+
 /// `path` with `.` and `..` worked out, without touching the filesystem,
 /// so two spellings of one output compare equal.
 fn normalize(path: &std::path::Path) -> PathBuf {
@@ -690,7 +744,7 @@ fn record_story(path: &std::path::Path, story: &Story) -> bool {
                             let mut runner = Runner::new(&mut session, story)?;
                             runner.launch(story)?;
                             drop(runner);
-                            session.start_recording();
+                            session.start_recording(FIXED_TOO.load(Ordering::Relaxed));
                             session.run_for(LEAD_IN)?;
                             let mut runner = Runner::new(&mut session, story)?;
                             let steps = runner.perform(story)?;
@@ -699,11 +753,18 @@ fn record_story(path: &std::path::Path, story: &Story) -> bool {
                             session.mark_segment("end");
                             session.camera.overview();
                             session.run_for(TAIL)?;
-                            let recording =
+                            let (recording, fixed) =
                                 session.stop_recording().expect("recording was started");
                             let gif = boundary.work().join("out.gif");
                             let written = recording.write_gif(&gif, story.demo.fps)?;
-                            Ok((steps, written))
+                            let fixed = match fixed {
+                                Some(fixed) => {
+                                    let gif = boundary.work().join("out-fixed.gif");
+                                    Some(fixed.write_gif(&gif, story.demo.fps)?)
+                                }
+                                None => None,
+                            };
+                            Ok((steps, written, fixed))
                         })();
                         if result.is_err() {
                             if let Err(e) = session.save_artifact("failure.png") {
@@ -713,44 +774,10 @@ fn record_story(path: &std::path::Path, story: &Story) -> bool {
                         result
                     });
                 match recorded {
-                    Ok((steps, written)) => {
-                        println!(
-                            "{}: {steps} steps, {} frames, {:.1} s, {} KB",
-                            theme.name(),
-                            written.frames,
-                            written.seconds,
-                            written.bytes / 1024
-                        );
-                        for part in &written.segments {
-                            let camera = if part.camera_bytes > 0 {
-                                format!(", {} KB while the camera moved", part.camera_bytes / 1024)
-                            } else {
-                                String::new()
-                            };
-                            println!(
-                                "  {:>5.1} s {:>6} KB  {}{camera}",
-                                part.seconds,
-                                part.bytes / 1024,
-                                part.label
-                            );
-                        }
-                        let budget = if written.camera_moved {
-                            matinee::record::CAMERA_BUDGET
-                        } else {
-                            matinee::record::BUDGET
-                        };
-                        if written.bytes > budget {
-                            eprintln!(
-                                "matinee: warning: the {} GIF is {} KB, over its {} KB budget{}",
-                                theme.name(),
-                                written.bytes / 1024,
-                                budget / 1024,
-                                if written.camera_moved {
-                                    " for a moving camera"
-                                } else {
-                                    ""
-                                }
-                            );
+                    Ok((steps, written, fixed)) => {
+                        report(theme.name(), steps, &written);
+                        if let Some(fixed) = fixed {
+                            report(&format!("{} fixed", theme.name()), steps, &fixed);
                         }
                         0
                     }
@@ -766,27 +793,39 @@ fn record_story(path: &std::path::Path, story: &Story) -> bool {
             failed = true;
             break;
         }
-        let target = story.dir.join(format!(
-            "{}-{}.gif",
-            story.demo.output.display(),
-            theme.name()
-        ));
-        let copied = match result {
-            Ok(0) => target
-                .parent()
-                .map(std::fs::create_dir_all)
-                .transpose()
-                .and_then(|_| std::fs::copy(work.join("out.gif"), &target).map(drop)),
-            Ok(_) => Err(std::io::Error::other("not recorded")),
-            Err(e) => Err(e),
-        };
-        match copied {
-            Ok(()) => println!("{}", target.display()),
-            Err(e) => {
-                eprintln!("matinee: {}: {e}", target.display());
-                failed = true;
-                break;
+        let mut gifs = vec![("out.gif", "")];
+        if FIXED_TOO.load(Ordering::Relaxed) {
+            gifs.push(("out-fixed.gif", "-fixed"));
+        }
+        let result = result.and_then(|code| match code {
+            0 => Ok(()),
+            _ => Err(std::io::Error::other("not recorded")),
+        });
+        for (written, suffix) in gifs {
+            let target = story.dir.join(format!(
+                "{}-{}{suffix}.gif",
+                story.demo.output.display(),
+                theme.name()
+            ));
+            let copied = match &result {
+                Ok(()) => target
+                    .parent()
+                    .map(std::fs::create_dir_all)
+                    .transpose()
+                    .and_then(|_| std::fs::copy(work.join(written), &target).map(drop)),
+                Err(e) => Err(std::io::Error::new(e.kind(), e.to_string())),
+            };
+            match copied {
+                Ok(()) => println!("{}", target.display()),
+                Err(e) => {
+                    eprintln!("matinee: {}: {e}", target.display());
+                    failed = true;
+                    break;
+                }
             }
+        }
+        if failed {
+            break;
         }
     }
     let _ = std::fs::remove_dir_all(&work);

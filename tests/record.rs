@@ -175,3 +175,42 @@ fn a_folder_with_no_storyboards_is_an_error() {
     assert!(text.contains("no storyboards in ."), "{text}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn fixed_too_writes_a_fixed_camera_gif_from_the_same_run() {
+    let dir = folder("fixed-too", &[("demo.toml", story("demo", "hello"))]);
+    let (ok, text) = record(&dir, &["--fixed-too", "demo.toml"]);
+    assert!(ok, "{text}");
+    assert!(dir.join("demo-dark.gif").exists(), "{text}");
+    assert!(dir.join("demo-dark-fixed.gif").exists(), "{text}");
+    // One run: both report the same steps and length.
+    let summary = |name: &str| {
+        let line = text
+            .lines()
+            .find(|l| l.starts_with(&format!("{name}:")))
+            .unwrap_or_else(|| panic!("no {name} line in {text}"));
+        let seconds = line.split(", ").find(|p| p.ends_with(" s")).unwrap();
+        (
+            line.split(':')
+                .nth(1)
+                .unwrap()
+                .split(',')
+                .next()
+                .unwrap()
+                .to_owned(),
+            seconds.to_owned(),
+        )
+    };
+    assert_eq!(summary("dark"), summary("dark fixed"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn fixed_too_applies_only_to_record() {
+    let out = Command::new(env!("CARGO_BIN_EXE_matinee"))
+        .args(["run", "--fixed-too", "demo.toml"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--fixed-too applies to record"));
+}

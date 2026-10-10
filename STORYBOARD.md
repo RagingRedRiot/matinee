@@ -97,6 +97,12 @@ key badges are drawn at output resolution after camera cropping.
 screen, unless it sets `position` or `size`: then the pane takes only that
 part, and the rest is left for windows that its commands open. `[demo]` also supports `scale`, `fps`, and `lossy` (6 by default,
 0 for exact LZW color handling; GIF palette quantization still applies).
+
+`matinee record --fixed-too` also writes each GIF with the camera held on
+the whole screen, as `<output>-<theme>-fixed.gif`. Both come from the same
+run, so they show the same moments and differ only in the camera, which
+makes it easy to judge what the moving camera adds and what it costs.
+
 Recording prints each scene's duration and encoded size, including camera
 movement cost, and warns above 2 MiB per theme with a fixed camera or 5 MiB
 with movement. Review legibility at the actual display width.

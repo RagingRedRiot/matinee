@@ -20,9 +20,6 @@ pub use proc::Child;
 pub use shell::Shell;
 pub use wm::parent_of;
 
-/// The private desktop the session makes for its apps.
-pub(crate) const DESKTOP: &str = "matinee";
-
 /// The shell `matinee shell` runs by default, and the one seeds use.
 pub const SHELL: &str = "powershell.exe";
 /// What the terminal pane's prompt shows before each command.

@@ -15,6 +15,9 @@ use crate::{
     story::{Story, Theme},
 };
 use std::{collections::HashSet, io, time::Duration};
+use windows_sys::Win32::UI::HiDpi::{
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
+};
 
 /// The desktop background behind windows, the same gray as on Linux.
 const BACKGROUND: u32 = 0xff80_8c8c;
@@ -47,7 +50,13 @@ impl Display {
     /// desktop and move this thread onto it, so the apps it launches open
     /// their windows there.
     pub fn start(_boundary: &Boundary, story: &Story, theme: Theme) -> io::Result<Display> {
-        let desktop = wm::Desktop::create(super::DESKTOP)?;
+        // Without this, Windows scales what a DPI-unaware process sees on a
+        // scaled display, and only some of it: window rectangles, captures,
+        // and UI Automation would disagree about where a window is.
+        unsafe {
+            SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        }
+        let desktop = wm::Desktop::create()?;
         let [w, h] = story.demo.size;
         Ok(Display {
             _desktop: desktop,

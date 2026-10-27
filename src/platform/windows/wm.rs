@@ -7,7 +7,14 @@
 //! surface to read back from such a desktop, so each window is captured on
 //! its own through `PrintWindow` and composited by its position.
 
-use std::{io, mem, ptr};
+use super::proc::Job;
+use std::{
+    cell::RefCell,
+    io, mem, ptr,
+    sync::atomic::{AtomicU32, Ordering},
+    thread,
+    time::{Duration, Instant},
+};
 use windows_sys::Win32::{
     Foundation::{CloseHandle, HANDLE, HWND, RECT},
     Graphics::{
@@ -45,16 +52,42 @@ const HELPER_CLASSES: &[&str] = &["SysShadow", "IME", "MSCTFIME UI"];
 /// Classes of popups drawn but not targeted: menus and tooltips.
 const POPUP_CLASSES: &[&str] = &["#32768", "tooltips_class32"];
 
-/// A desktop of the session's own, and the thread's way back from it.
+/// Sessions this process has made a desktop for, so each gets a new one.
+static SESSIONS: AtomicU32 = AtomicU32::new(0);
+
+thread_local! {
+    /// The name of the session desktop this thread is on, and the job its
+    /// apps go in.
+    static CURRENT: RefCell<Option<(String, HANDLE)>> = const { RefCell::new(None) };
+}
+
+/// The session desktop this thread is on, by name, and its job.
+pub fn session_desktop() -> Option<(String, HANDLE)> {
+    CURRENT.with(|c| c.borrow().clone())
+}
+
+/// A desktop of the session's own, the job its apps run in, and the
+/// thread's way back from it.
+///
+/// Windows destroys a desktop once nothing holds it: not matinee, and no
+/// process running on it. Each session gets a desktop of its own, so an app
+/// that outlives one session never shows in the next, and the job ends the
+/// session's apps, and whatever they started, with the session.
 pub struct Desktop {
     handle: HDESK,
     original: HDESK,
+    name: String,
+    job: Job,
 }
 
 impl Desktop {
     /// Make a private desktop and move this thread onto it, so that every
     /// process it starts opens its windows there.
-    pub fn create(name: &str) -> io::Result<Desktop> {
+    pub fn create() -> io::Result<Desktop> {
+        let session = SESSIONS.fetch_add(1, Ordering::Relaxed);
+        let name = format!("matinee-{}-{session}", std::process::id());
+        let job = Job::new()
+            .map_err(|e| io::Error::new(e.kind(), format!("creating the session's job: {e}")))?;
         let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
         let original = unsafe { GetThreadDesktop(GetCurrentThreadId()) };
         // Hooks from other accounts are irrelevant; the flag keeps apps
@@ -83,7 +116,13 @@ impl Desktop {
                 format!("entering the desktop: {e}"),
             ));
         }
-        Ok(Desktop { handle, original })
+        CURRENT.with(|c| *c.borrow_mut() = Some((name.clone(), job.handle())));
+        Ok(Desktop {
+            handle,
+            original,
+            name,
+            job,
+        })
     }
 }
 
@@ -138,7 +177,10 @@ pub fn app_windows_here() -> Vec<HWND> {
 /// App windows on this thread's desktop, counting ones an app has created
 /// but not yet shown, so matinee can give them their place and reveal them.
 pub fn hidden_app_windows_here() -> Vec<HWND> {
-    let desktop = unsafe { GetThreadDesktop(GetCurrentThreadId()) };
+    hidden_app_windows_on(unsafe { GetThreadDesktop(GetCurrentThreadId()) })
+}
+
+fn hidden_app_windows_on(desktop: HDESK) -> Vec<HWND> {
     all_windows_on(desktop)
         .into_iter()
         .filter(|&h| !HELPER_CLASSES.contains(&class_name(h).as_str()))
@@ -162,7 +204,30 @@ pub fn show(hwnd: HWND) {
 }
 
 impl Drop for Desktop {
+    /// End the session's apps, then name any window still open: a program
+    /// Windows started on the app's behalf, outside the job, such as a
+    /// packaged app. It keeps the desktop alive until it exits.
     fn drop(&mut self) {
+        CURRENT.with(|c| c.borrow_mut().take());
+        self.job.kill();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut left = hidden_app_windows_on(self.handle);
+        while !left.is_empty() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(50));
+            left = hidden_app_windows_on(self.handle);
+        }
+        if !left.is_empty() {
+            let mut programs: Vec<String> =
+                left.iter().map(|&h| program_name(process_of(h))).collect();
+            programs.sort();
+            programs.dedup();
+            eprintln!(
+                "matinee: warning: {} still running on desktop {} after the session ended; \
+                 Windows started it outside the session, so close it yourself",
+                programs.join(", "),
+                self.name
+            );
+        }
         unsafe {
             SetThreadDesktop(self.original);
             CloseDesktop(self.handle);

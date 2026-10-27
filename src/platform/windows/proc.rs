@@ -7,13 +7,23 @@
 //! the desktop named in its startup info, the way any launcher that targets
 //! a specific desktop does. Everything else, the environment and working
 //! directory, matches what the standard spawn would have used.
+//!
+//! Each launch also goes into the session's [`Job`], before it can run, so
+//! whatever it starts in turn ends with the session too.
 
 use std::{io, mem, os::windows::ffi::OsStrExt, path::Path, ptr};
 use windows_sys::Win32::{
     Foundation::{CloseHandle, HANDLE},
-    System::Threading::{
-        CREATE_UNICODE_ENVIRONMENT, CreateProcessW, GetExitCodeProcess, PROCESS_INFORMATION,
-        STARTUPINFOW, TerminateProcess, WaitForSingleObject,
+    System::{
+        JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, TerminateJobObject,
+        },
+        Threading::{
+            CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, GetExitCodeProcess,
+            PROCESS_INFORMATION, ResumeThread, STARTUPINFOW, TerminateProcess, WaitForSingleObject,
+        },
     },
 };
 
@@ -56,10 +66,55 @@ impl Drop for Child {
     }
 }
 
-/// Start `program` with `args` on the desktop named `desktop`, with exactly
-/// `env` as its environment and `dir` as its working directory.
+/// A job that stops every process in it when its last handle closes: when
+/// the session ends, or when matinee itself exits or is stopped.
+pub struct Job(HANDLE);
+
+impl Job {
+    pub fn new() -> io::Result<Job> {
+        let handle = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
+        if handle.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let job = Job(handle);
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { mem::zeroed() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let ok = unsafe {
+            SetInformationJobObject(
+                job.0,
+                JobObjectExtendedLimitInformation,
+                &limits as *const _ as *const _,
+                mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(job)
+    }
+
+    pub fn handle(&self) -> HANDLE {
+        self.0
+    }
+
+    /// Stop every process in the job now.
+    pub fn kill(&self) {
+        unsafe { TerminateJobObject(self.0, 1) };
+    }
+}
+
+impl Drop for Job {
+    fn drop(&mut self) {
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
+/// Start `program` with `args` on the desktop named `desktop`, in `job`,
+/// with exactly `env` as its environment and `dir` as its working
+/// directory.
 pub fn spawn_on_desktop(
     desktop: &str,
+    job: HANDLE,
     program: &str,
     args: &[String],
     env: &[(String, String)],
@@ -94,7 +149,8 @@ pub fn spawn_on_desktop(
             ptr::null(),
             ptr::null(),
             0,
-            CREATE_UNICODE_ENVIRONMENT,
+            // Held until it is in the job, so nothing it starts escapes.
+            CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
             block.as_ptr() as *const _,
             dir.as_ptr(),
             &startup,
@@ -105,7 +161,22 @@ pub fn spawn_on_desktop(
         let e = io::Error::last_os_error();
         return Err(io::Error::new(e.kind(), format!("{program}: {e}")));
     }
-    unsafe { CloseHandle(info.hThread) };
+    if unsafe { AssignProcessToJobObject(job, info.hProcess) } == 0 {
+        let e = io::Error::last_os_error();
+        unsafe {
+            TerminateProcess(info.hProcess, 1);
+            CloseHandle(info.hThread);
+            CloseHandle(info.hProcess);
+        }
+        return Err(io::Error::new(
+            e.kind(),
+            format!("{program}: joining the session's job: {e}"),
+        ));
+    }
+    unsafe {
+        ResumeThread(info.hThread);
+        CloseHandle(info.hThread);
+    }
     Ok(Child {
         handle: info.hProcess,
         pid: info.dwProcessId,

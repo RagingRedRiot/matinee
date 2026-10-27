@@ -179,7 +179,9 @@ impl Boundary {
     ) -> io::Result<super::Child> {
         let mut environment = self.env();
         environment.extend(env.iter().cloned());
-        super::proc::spawn_on_desktop(super::DESKTOP, program, args, &environment, &self.story_dir)
+        let (desktop, job) = super::wm::session_desktop()
+            .ok_or_else(|| io::Error::other(format!("{program}: no session desktop to open on")))?;
+        super::proc::spawn_on_desktop(&desktop, job, program, args, &environment, &self.story_dir)
     }
 
     /// A command that runs `script` in the session's shell, as

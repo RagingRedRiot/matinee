@@ -62,7 +62,8 @@ Each step has one action. Durations use seconds or milliseconds, such as
 | Playback | `{ terminal = "gh auth status", output = "fixtures/auth.txt" }`; declared canned output, no command runs |
 | Pause | `{ hold = "2s" }` |
 
-Names match exactly; a trailing `*` matches a prefix. Use `role`, `within`
+Names match exactly; a trailing `*` matches a prefix, and a `*` at both
+ends matches anywhere, as in a console window's whole buffer. Use `role`, `within`
 (named ancestor), `near` (named nearby element), `window` (exact window title),
 and `in` (launch name) to disambiguate. Nested matches such as a button and
 its own label count as one target. Missing, ambiguous, hidden, and offscreen

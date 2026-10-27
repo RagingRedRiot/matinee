@@ -795,12 +795,16 @@ impl<'r, 'b> Runner<'r, 'b> {
     }
 }
 
-/// Whether `name`, as a storyboard writes it, matches `actual`: exactly,
-/// or, when it ends in `*`, as a prefix, for labels that change as an app
-/// runs (`j1 release*` matches `j1 release, running, Now`).
+/// Whether `name`, as a storyboard writes it, matches `actual`: exactly;
+/// when it ends in `*`, as a prefix, for labels that change as an app runs
+/// (`j1 release*` matches `j1 release, running, Now`); and when it also
+/// starts with `*`, anywhere, for a console's whole buffer in one field.
 fn names(name: &str, actual: &str) -> bool {
     match name.strip_suffix('*') {
-        Some(prefix) => actual.starts_with(prefix),
+        Some(rest) => match rest.strip_prefix('*') {
+            Some(inner) => actual.contains(inner),
+            None => actual.starts_with(rest),
+        },
         None => actual == name,
     }
 }
@@ -954,6 +958,11 @@ mod tests {
         assert!(!names("j1 release*", "j2 release"));
         assert!(names("Drop here", "Drop here"));
         assert!(!names("Drop", "Drop here"));
+        assert!(names("*3 passed*", "> make test\r\n3 passed, 0 failed\r\n"));
+        assert!(!names(
+            "*3 passed*",
+            "> make test\r\n0 passed, 3 failed\r\n"
+        ));
     }
 
     #[test]

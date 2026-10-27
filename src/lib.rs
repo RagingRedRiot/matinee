@@ -2,24 +2,22 @@
 //!
 //! The pipeline is built into matinee rather than borrowed from external
 //! tools (see BUILD-DECISIONS.md). Each stage gets its own module as it is
-//! built: the storyboard, the isolation boundary, the headless compositor,
-//! accessibility targets and input, the terminal, the camera on a
-//! frame-indexed timeline, and the GIF encoder.
+//! built: the storyboard, the session and the runner that performs steps
+//! in it, the terminal pane, the camera on a frame-indexed timeline, and
+//! the GIF encoder. What depends on the desktop platform, such as the
+//! isolation boundary, the headless compositor, and the accessibility
+//! tree, lives under [`platform`].
 
-pub mod a11y;
-pub mod boundary;
-pub mod bus;
 pub mod camera;
-pub mod compositor;
 pub mod discover;
+pub mod frame;
 pub mod keys;
 pub mod lzw;
 pub mod overlay;
 pub mod palette;
-pub mod portal;
+pub mod platform;
 pub mod record;
 pub mod runner;
 pub mod session;
 pub mod story;
 pub mod terminal;
-pub mod viewport;

@@ -115,7 +115,8 @@ change to a workflow takes effect only after it merges.
 The separate controls check requires a maintainer to apply `reviewed-controls`
 to the current revision when a pull request changes files under `.github/`,
 `.cargo/`, or `scripts/`, build files such as `Cargo.toml` and `Cargo.lock`,
-the isolation boundary in `src/boundary.rs`, or existing files under `tests/`.
+the isolation boundary in `src/platform/linux/boundary.rs`, or existing files
+under `tests/`.
 Adding a new file under `tests/` does not by itself require that label. A later
 push requires renewed maintainer review. An expected controls failure is not a
 reason to weaken or bypass the check.

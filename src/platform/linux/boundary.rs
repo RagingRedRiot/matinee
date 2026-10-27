@@ -262,6 +262,14 @@ impl Boundary {
         cmd
     }
 
+    /// A command that runs `script` in the session's shell, as
+    /// [`Boundary::command`] would run a program.
+    pub fn shell(&self, script: &str) -> Command {
+        let mut cmd = self.command("bash");
+        cmd.args(["-c", script]);
+        cmd
+    }
+
     /// Run `inside` within a new boundary and return its exit code.
     ///
     /// This forks, so the calling process must have only one thread.

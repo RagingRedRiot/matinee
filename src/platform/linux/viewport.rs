@@ -17,7 +17,7 @@
 //! only be created by a single-threaded process, and `record` creates one
 //! per theme.
 
-use crate::{camera::Rect, compositor::Frame};
+use crate::{camera::Rect, frame::Frame};
 use std::{
     io,
     os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd},

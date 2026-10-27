@@ -1,4 +1,4 @@
-use matinee::{a11y::A11y, boundary::Boundary, runner::Runner, session::Session, story::Story};
+use matinee::{platform::Boundary, runner::Runner, session::Session, story::Story};
 use std::hash::{Hash, Hasher};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -165,7 +165,7 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     };
-    matinee::viewport::close();
+    matinee::platform::viewport::close();
     code
 }
 
@@ -184,7 +184,7 @@ fn open_viewport(stories: &[Story]) -> std::io::Result<()> {
         .max()
         .unwrap_or(0);
     let [w, h] = stories[0].demo.size;
-    matinee::viewport::open(pixels, (w, h))
+    matinee::platform::viewport::open(pixels, (w, h))
 }
 
 /// Assertion and failure images are written inside the same session as the
@@ -438,21 +438,20 @@ fn probe(path: &str, all: bool, command: &[String]) -> ExitCode {
 }
 
 fn print_tree(session: &Session, all: bool) -> std::io::Result<()> {
-    let windows = session.compositor.windows();
+    let windows = session.windows();
     for window in &windows {
-        let r = window.rect;
         println!(
             "window \"{}\" ({}) at {},{} {}x{}{}",
             window.title,
             window.app_id,
-            r.loc.x,
-            r.loc.y,
-            r.size.w,
-            r.size.h,
+            window.x,
+            window.y,
+            window.width,
+            window.height,
             if window.focused { ", focused" } else { "" }
         );
     }
-    let a11y = A11y::connect(&session.buses)?;
+    let a11y = session.accessibility()?;
     let apps = a11y.apps();
     if apps.is_empty() {
         println!("\nno app published an accessibility tree");
@@ -485,8 +484,8 @@ fn print_tree(session: &Session, all: bool) -> std::io::Result<()> {
                 .iter()
                 .find(|w| w.title == node.window)
                 .or_else(|| (windows.len() == 1).then(|| &windows[0]))
-                .map_or((0, 0), |w| (w.rect.size.w, w.rect.size.h));
-            let at = matinee::a11y::in_points(&nodes, i, size, session.scale() as i32)
+                .map_or((0, 0), |w| (w.width, w.height));
+            let at = matinee::platform::in_points(&nodes, i, size, session.scale() as i32)
                 .map(|(x, y, w, h)| format!(" at {x},{y} {w}x{h}"))
                 .unwrap_or_default();
             let text = node

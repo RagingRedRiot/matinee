@@ -1,13 +1,13 @@
-//! A story's desktop session: the built-in compositor, the session and
-//! accessibility buses, and the apps running under them, all inside the
-//! isolation boundary.
+//! A story's desktop session: the display, the apps running on it, the
+//! terminal pane, and the recording, all inside the isolation boundary.
+//! What the display and the boundary are made of depends on the platform
+//! (see [`crate::platform`]); the session, the runner, and everything
+//! downstream of a frame do not.
 
 use crate::{
-    boundary::Boundary,
-    bus::Buses,
     camera::{Camera, Rect},
-    compositor::{Compositor, Frame},
-    portal,
+    frame::Frame,
+    platform::{A11y, Boundary, Button, Display, Window},
     record::Recording,
     story::{CameraMode, PanePosition, Story, Theme},
     terminal::{Pane, Terminal},
@@ -19,17 +19,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// The compositor's socket name in the session's runtime directory.
-const DISPLAY: &str = "wayland-1";
-
 pub struct Session<'a> {
     boundary: &'a Boundary,
-    pub compositor: Compositor,
-    pub buses: Buses,
+    display: Display,
     /// Launched programs, by launch name.
     children: Vec<(String, Child)>,
-    /// Xwayland's display, for `DISPLAY`, when a launch needs X11.
-    x11_display: Option<String>,
     period: Duration,
     /// When the session started, for pacing frames in real time.
     started: Instant,
@@ -52,32 +46,13 @@ pub struct Session<'a> {
     artifacts: bool,
     /// What recordings show of the screen.
     pub camera: Camera,
-    theme: Theme,
 }
 
 impl<'a> Session<'a> {
     /// Start the session for `story` in `theme`. Call this inside the
     /// boundary.
     pub fn start(boundary: &'a Boundary, story: &Story, theme: Theme) -> io::Result<Session<'a>> {
-        let runtime = boundary.runtime_dir().to_path_buf();
-        let buses = Buses::start(boundary, &runtime, theme)?;
-        let keyfile = boundary.home().join(".config/glib-2.0/settings/keyfile");
-        std::fs::create_dir_all(keyfile.parent().unwrap())?;
-        std::fs::write(&keyfile, portal::Settings::new(theme).keyfile())?;
-        let mut compositor = Compositor::new(
-            &runtime.join(DISPLAY),
-            (story.demo.size[0], story.demo.size[1]),
-            story.demo.scale,
-        )?;
-        let x11_display = if story.launches.iter().any(|l| l.x11) {
-            let display = compositor.start_xwayland(&runtime)?;
-            // Qt 5 finds the accessibility bus here on X11, as desktops
-            // publish it; asking the session bus loses a startup race.
-            compositor.set_x11_root_property("AT_SPI_BUS", &buses.a11y)?;
-            Some(format!(":{display}"))
-        } else {
-            None
-        };
+        let mut display = Display::start(boundary, story, theme)?;
         let [w, h] = story.demo.size.map(|n| n as f32);
         let terminal = if story.has_terminal() {
             let pane = &story.terminal;
@@ -88,19 +63,19 @@ impl<'a> Session<'a> {
                 (true, _) => (0.0, 0.0, w, h),
                 (false, PanePosition::Bottom) => {
                     let size = pane.size.map_or((h * 0.35).round(), |n| n as f32);
-                    compositor.set_window_area(0, 0, w as i32, (h - size) as i32);
+                    display.set_window_area(0, 0, w as i32, (h - size) as i32);
                     (0.0, h - size, w, size)
                 }
                 (false, PanePosition::Right) => {
                     let size = pane.size.map_or((w * 0.45).round(), |n| n as f32);
-                    compositor.set_window_area(0, 0, (w - size) as i32, h as i32);
+                    display.set_window_area(0, 0, (w - size) as i32, h as i32);
                     (w - size, 0.0, size, h)
                 }
             };
             let pane = Pane::new(rect, story.terminal.font_size, theme);
             let (rows, cols) = pane.grid();
             Some((
-                Terminal::start(boundary, rows, cols, &app_env(&buses, theme))?,
+                Terminal::start(boundary, rows, cols, &display.env(false)?)?,
                 pane,
             ))
         } else {
@@ -108,10 +83,8 @@ impl<'a> Session<'a> {
         };
         Ok(Session {
             boundary,
-            compositor,
-            buses,
+            display,
             children: vec![],
-            x11_display,
             period: Duration::from_secs(1) / story.demo.fps,
             started: Instant::now(),
             frames: 0,
@@ -132,7 +105,6 @@ impl<'a> Session<'a> {
                 story.camera.mode == CameraMode::Fixed,
                 story.camera.reading_width,
             ),
-            theme,
         })
     }
 
@@ -140,18 +112,13 @@ impl<'a> Session<'a> {
     /// steps as `name`.
     /// A leading `~/` in `program` means the session's home folder.
     pub fn spawn(&mut self, name: &str, program: &str, args: &[String]) -> io::Result<()> {
-        let env = owned(app_env(&self.buses, self.theme));
+        let env = self.display.env(false)?;
         self.spawn_with(name, program, args, env)
     }
 
-    /// Start a program under Xwayland, known to steps as `name`.
+    /// Start a program under X11, known to steps as `name`.
     pub fn spawn_x11(&mut self, name: &str, program: &str, args: &[String]) -> io::Result<()> {
-        let display = self
-            .x11_display
-            .clone()
-            .ok_or_else(|| io::Error::other("Xwayland is not running"))?;
-        let mut env = owned(x11_env(&self.buses, self.theme));
-        env.push(("DISPLAY".into(), display));
+        let env = self.display.env(true)?;
         self.spawn_with(name, program, args, env)
     }
 
@@ -196,9 +163,8 @@ impl<'a> Session<'a> {
         for (i, seed) in story.seeds.iter().enumerate() {
             let mut child = self
                 .boundary
-                .command("bash")
-                .args(["-c", &seed.run])
-                .envs(app_env(&self.buses, self.theme))
+                .shell(&seed.run)
+                .envs(self.display.env(false)?)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
@@ -273,7 +239,7 @@ impl<'a> Session<'a> {
             let frame = self.tick()?;
             // A window counts once it has taken its final size: before
             // that, a slow app can look settled at its first size.
-            let windows = self.compositor.windows();
+            let windows = self.display.windows();
             let shown = !windows.is_empty() && windows.iter().all(|w| w.placed);
             if !shown || last.as_ref().is_none_or(|l| l.pixels != frame.pixels) {
                 stable_since = Instant::now();
@@ -302,13 +268,12 @@ impl<'a> Session<'a> {
     /// area: an app with a larger minimum size keeps it, and the rest is
     /// hidden behind the terminal pane or past the screen's edge.
     fn warn_oversized(&mut self) {
-        let (x, y, w, h) = self.compositor.window_area();
-        for window in self.compositor.windows() {
-            let r = window.rect;
-            let fits = r.loc.x >= x
-                && r.loc.y >= y
-                && r.loc.x + r.size.w <= x + w
-                && r.loc.y + r.size.h <= y + h;
+        let (x, y, w, h) = self.display.window_area();
+        for window in self.display.windows() {
+            let fits = window.x >= x
+                && window.y >= y
+                && window.x + window.width <= x + w
+                && window.y + window.height <= y + h;
             if !window.placed || fits || self.oversized.contains(&window.title) {
                 continue;
             }
@@ -319,7 +284,7 @@ impl<'a> Session<'a> {
             };
             eprintln!(
                 "matinee: warning: window \"{}\" is {}x{} points, larger than its {w}x{h} area, so part of it is hidden {hidden}",
-                window.title, window.rect.size.w, window.rect.size.h,
+                window.title, window.width, window.height,
             );
             self.oversized.push(window.title);
         }
@@ -328,6 +293,40 @@ impl<'a> Session<'a> {
     /// Device pixels per point.
     pub fn scale(&self) -> u32 {
         self.scale
+    }
+
+    /// Top-level windows on the display, bottom to top.
+    pub fn windows(&self) -> Vec<Window> {
+        self.display.windows()
+    }
+
+    /// The area windows are laid out in: x, y, width, height in points.
+    pub fn window_area(&self) -> (i32, i32, i32, i32) {
+        self.display.window_area()
+    }
+
+    /// Move the pointer to `(x, y)` in logical points, at the current time
+    /// on the timeline.
+    pub fn pointer_move(&mut self, x: f64, y: f64) {
+        let now = self.now();
+        self.display.pointer_move(x, y, now);
+    }
+
+    /// Press or release a pointer button where the pointer is.
+    pub fn pointer_button(&mut self, button: Button, pressed: bool) {
+        let now = self.now();
+        self.display.pointer_button(button, pressed, now);
+    }
+
+    /// Press or release a key by its code (see [`crate::keys`]).
+    pub fn key(&mut self, keycode: u32, pressed: bool) {
+        let now = self.now();
+        self.display.key(keycode, pressed, now);
+    }
+
+    /// Connect to the accessibility trees apps publish.
+    pub fn accessibility(&self) -> io::Result<A11y> {
+        self.display.accessibility()
     }
 
     /// The time on the session's frame timeline.
@@ -351,7 +350,7 @@ impl<'a> Session<'a> {
         }
         loop {
             let left = due.saturating_duration_since(Instant::now());
-            self.compositor.dispatch(left)?;
+            self.display.dispatch(left)?;
             if left.is_zero() {
                 break;
             }
@@ -361,10 +360,8 @@ impl<'a> Session<'a> {
         self.frames += 1;
         let frame = self.current_frame()?;
         self.camera.step();
-        let pointer = self
-            .pointer_shown
-            .then(|| self.compositor.pointer_location());
-        crate::viewport::publish(&frame, self.camera.view(), pointer, self.scale);
+        let pointer = self.pointer_shown.then(|| self.display.pointer_location());
+        crate::platform::viewport::publish(&frame, self.camera.view(), pointer, self.scale);
         let size = (self.size[0] as f64, self.size[1] as f64);
         if let Some(recording) = &mut self.recording {
             let pointer = pointer.map(|at| self.camera.to_output(at, size));
@@ -380,7 +377,7 @@ impl<'a> Session<'a> {
 
     /// Draw the current session without advancing input, the camera, or time.
     pub fn current_frame(&mut self) -> io::Result<Frame> {
-        let mut frame = self.compositor.render(self.now())?;
+        let mut frame = self.display.render(self.now())?;
         if let Some((terminal, pane)) = &self.terminal {
             pane.draw(terminal, &mut frame, self.scale);
         }
@@ -473,7 +470,7 @@ impl<'a> Session<'a> {
 
     /// Fail if a launched program, a bus, or the registry has exited.
     fn check_children(&mut self) -> io::Result<()> {
-        self.buses.check()?;
+        self.display.check()?;
         for (name, child) in &mut self.children {
             if let Some(status) = child.try_wait()? {
                 return Err(io::Error::other(format!("{name} exited early ({status})")));
@@ -492,51 +489,4 @@ impl Drop for Session<'_> {
             let _ = child.wait();
         }
     }
-}
-
-/// Environment for programs in the session: the display, the buses, and
-/// the settings that make toolkits use them.
-fn app_env(buses: &Buses, theme: Theme) -> Vec<(&str, &str)> {
-    let mut env = vec![
-        ("WAYLAND_DISPLAY", DISPLAY),
-        ("XDG_SESSION_TYPE", "wayland"),
-        ("GDK_BACKEND", "wayland"),
-        ("QT_QPA_PLATFORM", "wayland"),
-        ("SDL_VIDEODRIVER", "wayland"),
-        ("MOZ_ENABLE_WAYLAND", "1"),
-        ("ELECTRON_OZONE_PLATFORM_HINT", "wayland"),
-        // GTK's own settings come from the keyfile written at start.
-        ("GSETTINGS_BACKEND", "keyfile"),
-        // The session has no GPU, so OpenGL ends up in Mesa's software
-        // renderer anyway; going straight there skips the failed hardware
-        // probes and the warnings they print.
-        ("LIBGL_ALWAYS_SOFTWARE", "1"),
-        // The theme being recorded, so a matinee run inside follows it.
-        ("MATINEE_THEME", theme.name()),
-    ];
-    env.extend(buses.env());
-    env
-}
-
-fn owned(env: Vec<(&str, &str)>) -> Vec<(String, String)> {
-    env.into_iter()
-        .map(|(k, v)| (k.to_owned(), v.to_owned()))
-        .collect()
-}
-
-/// Environment for X11 apps: the buses and settings, without the Wayland
-/// display, so toolkits that support both use X11. `DISPLAY` is added by
-/// the caller.
-fn x11_env(buses: &Buses, theme: Theme) -> Vec<(&str, &str)> {
-    let mut env = vec![
-        ("XDG_SESSION_TYPE", "x11"),
-        ("GDK_BACKEND", "x11"),
-        ("QT_QPA_PLATFORM", "xcb"),
-        ("SDL_VIDEODRIVER", "x11"),
-        ("GSETTINGS_BACKEND", "keyfile"),
-        ("LIBGL_ALWAYS_SOFTWARE", "1"),
-        ("MATINEE_THEME", theme.name()),
-    ];
-    env.extend(buses.env());
-    env
 }

@@ -21,10 +21,9 @@
 //! send it keys, and checks its status at `wait_exit` or the story's end.
 
 use crate::{
-    a11y::{A11y, App, Node},
     camera::Rect as CameraRect,
-    compositor::BUTTON_LEFT,
     keys,
+    platform::{A11y, App, Button, Node, in_points},
     session::Session,
     story::{Action, CameraMove, Step, Story, Target},
 };
@@ -110,7 +109,7 @@ struct Running {
 
 impl<'r, 'b> Runner<'r, 'b> {
     pub fn new(session: &'r mut Session<'b>, story: &Story) -> io::Result<Runner<'r, 'b>> {
-        let a11y = A11y::connect(&session.buses)?;
+        let a11y = session.accessibility()?;
         let [w, h] = story.demo.size;
         Ok(Runner {
             session,
@@ -147,7 +146,7 @@ impl<'r, 'b> Runner<'r, 'b> {
                 }
                 None => {
                     let start = Instant::now();
-                    while self.session.compositor.windows().is_empty() {
+                    while self.session.windows().is_empty() {
                         if start.elapsed() > timeout {
                             return Err(Failure {
                                 at,
@@ -162,7 +161,7 @@ impl<'r, 'b> Runner<'r, 'b> {
         // Windows first draw at their own size and are then resized to
         // their place; steps start once every window has settled there.
         let start = Instant::now();
-        while !self.session.compositor.windows().iter().all(|w| w.placed) {
+        while !self.session.windows().iter().all(|w| w.placed) {
             if start.elapsed() > LAUNCH_TIMEOUT {
                 return Err(Failure {
                     at: "launch".into(),
@@ -393,7 +392,7 @@ impl<'r, 'b> Runner<'r, 'b> {
     /// Where a window-relative point is on the output. The window is the
     /// one with the spot's exact title, or the only one open.
     fn spot(&self, spot: &crate::story::Spot) -> Result<(f64, f64), String> {
-        let windows = self.session.compositor.windows();
+        let windows = self.session.windows();
         let titles = || {
             windows
                 .iter()
@@ -418,7 +417,7 @@ impl<'r, 'b> Runner<'r, 'b> {
                 }
             },
         };
-        let (w, h) = (window.rect.size.w as f64, window.rect.size.h as f64);
+        let (w, h) = (window.width as f64, window.height as f64);
         let x = if spot.x < 0.0 { w + spot.x } else { spot.x };
         let y = if spot.y < 0.0 { h + spot.y } else { spot.y };
         if !(0.0..w).contains(&x) || !(0.0..h).contains(&y) {
@@ -427,7 +426,7 @@ impl<'r, 'b> Runner<'r, 'b> {
                 spot.x, spot.y, window.title
             ));
         }
-        Ok((window.rect.loc.x as f64 + x, window.rect.loc.y as f64 + y))
+        Ok((window.x as f64 + x, window.y as f64 + y))
     }
 
     fn terminal(&mut self) -> Result<&mut crate::terminal::Terminal, String> {
@@ -510,7 +509,7 @@ impl<'r, 'b> Runner<'r, 'b> {
 
     /// Keys go to the focused window; fail clearly when there is none.
     fn need_window(&self, step: &str) -> Result<(), String> {
-        if self.session.compositor.windows().is_empty() {
+        if self.session.windows().is_empty() {
             return Err(format!(
                 "a `{step}` step needs an app window to type into; terminal commands are `run` steps"
             ));
@@ -546,8 +545,7 @@ impl<'r, 'b> Runner<'r, 'b> {
                 from.0 + (point.0 - from.0) * e,
                 from.1 + (point.1 - from.1) * e,
             );
-            let now = self.session.now();
-            self.session.compositor.pointer_move(at.0, at.1, now);
+            self.session.pointer_move(at.0, at.1);
             self.pointer = at;
             if t >= 1.0 {
                 return Ok(());
@@ -558,46 +556,32 @@ impl<'r, 'b> Runner<'r, 'b> {
 
     /// Press where the pointer is, carry it to `point`, and let go there.
     fn drag(&mut self, point: (f64, f64)) -> io::Result<()> {
-        let now = self.session.now();
-        self.session
-            .compositor
-            .pointer_button(BUTTON_LEFT, true, now);
+        self.session.pointer_button(Button::Left, true);
         self.session.run_for(CLICK)?;
         self.move_to(point, DRAG)?;
         self.session.run_for(DROP_HOVER)?;
-        let now = self.session.now();
-        self.session
-            .compositor
-            .pointer_button(BUTTON_LEFT, false, now);
+        self.session.pointer_button(Button::Left, false);
         self.session.tick()?;
         Ok(())
     }
 
     fn click(&mut self) -> io::Result<()> {
         self.session.mark_click();
-        let now = self.session.now();
-        self.session
-            .compositor
-            .pointer_button(BUTTON_LEFT, true, now);
+        self.session.pointer_button(Button::Left, true);
         self.session.run_for(CLICK)?;
-        let now = self.session.now();
-        self.session
-            .compositor
-            .pointer_button(BUTTON_LEFT, false, now);
+        self.session.pointer_button(Button::Left, false);
         self.session.tick()?;
         Ok(())
     }
 
     fn press(&mut self, press: &keys::Press) -> io::Result<()> {
-        let now = self.session.now();
-        let keyboard = &mut self.session.compositor;
         for &m in &press.modifiers {
-            keyboard.key(m, true, now);
+            self.session.key(m, true);
         }
-        keyboard.key(press.key, true, now);
-        keyboard.key(press.key, false, now);
+        self.session.key(press.key, true);
+        self.session.key(press.key, false);
         for &m in press.modifiers.iter().rev() {
-            keyboard.key(m, false, now);
+            self.session.key(m, false);
         }
         Ok(())
     }
@@ -765,7 +749,7 @@ impl<'r, 'b> Runner<'r, 'b> {
     /// Where `node` is on the output, if it is inside its window.
     fn on_screen(&self, nodes: &[Node], i: usize, target: &Target) -> Result<Found, String> {
         let node = &nodes[i];
-        let windows = self.session.compositor.windows();
+        let windows = self.session.windows();
         let window = windows
             .iter()
             .find(|w| w.title == node.window)
@@ -779,34 +763,30 @@ impl<'r, 'b> Runner<'r, 'b> {
                     titles.join(", ")
                 )
             })?;
-        let (x, y, w, h) = crate::a11y::in_points(
+        let (x, y, w, h) = in_points(
             nodes,
             i,
-            (window.rect.size.w, window.rect.size.h),
+            (window.width, window.height),
             self.session.scale() as i32,
         )
         .ok_or_else(|| format!("\"{}\" does not report its position", target.name))?;
         let (cx, cy) = (x as f64 + w as f64 / 2.0, y as f64 + h as f64 / 2.0);
-        let size = window.rect.size;
-        if cx < 0.0 || cy < 0.0 || cx >= size.w as f64 || cy >= size.h as f64 {
+        if cx < 0.0 || cy < 0.0 || cx >= window.width as f64 || cy >= window.height as f64 {
             return Err(format!(
                 "\"{}\" is outside its window ({x},{y} {w}x{h} in a {}x{} window); scroll it into view first",
-                target.name, size.w, size.h
+                target.name, window.width, window.height
             ));
         }
-        let point = (window.rect.loc.x as f64 + cx, window.rect.loc.y as f64 + cy);
-        let (ax, ay, aw, ah) = self.session.compositor.window_area();
+        let point = (window.x as f64 + cx, window.y as f64 + cy);
+        let (ax, ay, aw, ah) = self.session.window_area();
         let inside = |v: f64, start: i32, len: i32| v >= start as f64 && v < (start + len) as f64;
         if !inside(point.0, ax, aw) || !inside(point.1, ay, ah) {
             return Err(format!(
                 "\"{}\" is behind the terminal pane: the window is {}x{} but the space beside the pane is {aw}x{ah}; make the pane smaller or the screen larger",
-                target.name, size.w, size.h
+                target.name, window.width, window.height
             ));
         }
-        let (left, top) = (
-            window.rect.loc.x as f64 + x as f64,
-            window.rect.loc.y as f64 + y as f64,
-        );
+        let (left, top) = (window.x as f64 + x as f64, window.y as f64 + y as f64);
         Ok(Found {
             point,
             rect: (left, top, w as f64, h as f64),

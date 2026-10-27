@@ -260,3 +260,11 @@ a runtime dependency.
   camera path, eased pointer motion, and capture schedule are planned on
   that timeline, so the same story yields the same camera path. Waiting for
   the app (window appearance, assertions, timeouts) still uses real time.
+- **Platform layer:** the compositor, the boundary, the buses, the
+  accessibility client, the shell behind the terminal pane, and the
+  viewport window are the parts that depend on the desktop platform. They
+  live under `src/platform`, one implementation per platform selected at
+  compile time, behind the same names: a display that renders frames and
+  takes input, a boundary that runs commands, an accessibility tree, and a
+  shell. The storyboard, session, runner, camera, overlays, and encoder are
+  the same everywhere. Linux is the only platform today.

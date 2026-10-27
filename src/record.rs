@@ -13,7 +13,7 @@
 
 use crate::{
     camera::Rect,
-    compositor::Frame,
+    frame::Frame,
     lzw,
     overlay::{self, Events, Painter, Shown},
     palette::{self, Histogram, Nearest},

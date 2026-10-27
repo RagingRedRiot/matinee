@@ -5,7 +5,7 @@
 //! is. A node's window is the top-level frame it sits under, matched to a
 //! compositor window by title.
 
-use crate::bus::Buses;
+use super::bus::Buses;
 use std::{collections::HashSet, io, time::Duration};
 use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 

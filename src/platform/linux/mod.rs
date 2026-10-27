@@ -8,13 +8,24 @@ pub mod bus;
 pub mod compositor;
 mod display;
 pub mod portal;
+mod proc;
 mod shell;
 pub mod viewport;
 
 pub use a11y::{A11y, App};
 pub use boundary::Boundary;
 pub use display::Display;
+pub use proc::Child;
 pub use shell::Shell;
+
+/// The parent of process `pid`, if it is running.
+pub fn parent_of(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The parent is the second field after the parenthesized name.
+    stat.rsplit_once(')')
+        .and_then(|(_, rest)| rest.split_whitespace().nth(1))
+        .and_then(|p| p.parse().ok())
+}
 
 /// The shell `matinee shell` runs by default, and the one seeds use.
 pub const SHELL: &str = "bash";

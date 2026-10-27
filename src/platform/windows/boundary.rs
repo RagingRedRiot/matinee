@@ -169,6 +169,19 @@ impl Boundary {
         cmd
     }
 
+    /// Start `program` with `args` on the session's private desktop, with
+    /// `env` added to the boundary's environment, as a launched app.
+    pub fn spawn_app(
+        &self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+    ) -> io::Result<super::Child> {
+        let mut environment = self.env();
+        environment.extend(env.iter().cloned());
+        super::proc::spawn_on_desktop(super::DESKTOP, program, args, &environment, &self.story_dir)
+    }
+
     /// A command that runs `script` in the session's shell, as
     /// [`Boundary::command`] would run a program.
     pub fn shell(&self, script: &str) -> Command {

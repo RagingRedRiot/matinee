@@ -268,5 +268,12 @@ a runtime dependency.
   takes input, a boundary that runs commands, an accessibility tree, and a
   shell. The storyboard, session, runner, camera, overlays, and encoder are
   the same everywhere. Linux has the full pipeline. Windows runs terminal
-  stories: PowerShell on a pseudo console, a fresh profile in place of
-  isolation, and no app windows yet.
+  stories through PowerShell on a pseudo console, and GUI stories by
+  launching apps onto a private desktop of the session's own, placing and
+  capturing each window with `PrintWindow`, posting them input, and reading
+  their UI Automation trees for named targets. The boundary is a fresh
+  profile, not yet isolation. Still missing on Windows: driving the system
+  theme, so light and dark look alike; a canvas larger than the app for the
+  zoom camera, so stories record at one pixel per point; and packaged (UWP
+  or WinUI) apps, which open on the user's own desktop instead of the
+  session's.

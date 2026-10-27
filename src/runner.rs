@@ -849,15 +849,7 @@ fn descends_from(mut pid: u32, root: u32) -> bool {
         if pid == root {
             return true;
         }
-        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
-            return false;
-        };
-        // The parent is the second field after the parenthesized name.
-        let Some(parent) = stat
-            .rsplit_once(')')
-            .and_then(|(_, rest)| rest.split_whitespace().nth(1))
-            .and_then(|p| p.parse().ok())
-        else {
+        let Some(parent) = crate::platform::parent_of(pid) else {
             return false;
         };
         if parent == 0 || parent == pid {

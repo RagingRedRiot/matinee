@@ -7,7 +7,7 @@
 use crate::{
     camera::{Camera, Rect},
     frame::Frame,
-    platform::{A11y, Boundary, Button, Display, Window},
+    platform::{A11y, Boundary, Button, Child, Display, Window},
     record::Recording,
     story::{CameraMode, PanePosition, Story, Theme},
     terminal::{Pane, Terminal},
@@ -15,7 +15,6 @@ use crate::{
 use std::{
     io,
     path::Path,
-    process::Child,
     time::{Duration, Instant},
 };
 
@@ -133,14 +132,7 @@ impl<'a> Session<'a> {
             Some(rest) => format!("{}/{rest}", self.boundary.home().display()),
             None => program.to_owned(),
         };
-        let program = program.as_str();
-        let child = self
-            .boundary
-            .command(program)
-            .args(args)
-            .envs(env)
-            .spawn()
-            .map_err(|e| io::Error::new(e.kind(), format!("{program}: {e}")))?;
+        let child = self.boundary.spawn_app(&program, args, &env)?;
         self.children.push((name.to_owned(), child));
         Ok(())
     }
@@ -472,7 +464,7 @@ impl<'a> Session<'a> {
     fn check_children(&mut self) -> io::Result<()> {
         self.display.check()?;
         for (name, child) in &mut self.children {
-            if let Some(status) = child.try_wait()? {
+            if let Some(status) = child.exited()? {
                 return Err(io::Error::other(format!("{name} exited early ({status})")));
             }
         }
@@ -485,8 +477,7 @@ impl Drop for Session<'_> {
     /// so they do not report a lost connection on the way out.
     fn drop(&mut self) {
         for (_, child) in &mut self.children {
-            let _ = child.kill();
-            let _ = child.wait();
+            child.kill();
         }
     }
 }

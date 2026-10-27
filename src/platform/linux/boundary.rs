@@ -262,6 +262,22 @@ impl Boundary {
         cmd
     }
 
+    /// Start `program` with `args` and `env` added to the boundary's
+    /// environment, as a launched app.
+    pub fn spawn_app(
+        &self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+    ) -> io::Result<super::Child> {
+        self.command(program)
+            .args(args)
+            .envs(env.iter().map(|(k, v)| (k, v)))
+            .spawn()
+            .map(super::Child::new)
+            .map_err(|e| io::Error::new(e.kind(), format!("{program}: {e}")))
+    }
+
     /// A command that runs `script` in the session's shell, as
     /// [`Boundary::command`] would run a program.
     pub fn shell(&self, script: &str) -> Command {

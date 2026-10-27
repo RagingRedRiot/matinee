@@ -102,8 +102,8 @@ impl Boundary {
 
     /// Run apps on the user's screen instead of a private desktop, for apps
     /// a private desktop cannot hold: packaged apps, which Windows opens on
-    /// the user's own desktop, and apps that ignore posted input, such as
-    /// WinUI and WPF ones, which need the real input queue.
+    /// the user's own desktop, and apps that need the screen to draw, such
+    /// as WPF ones.
     pub fn on_screen(mut self) -> io::Result<Boundary> {
         self.screen = true;
         Ok(self)

@@ -13,16 +13,23 @@ runs only when the user is logged on. Terminal stories run anywhere.
 
 By default each session makes a desktop of its own, which nothing shows,
 and launches its apps there. matinee places each window, captures it with
-`PrintWindow`, posts it input as messages, and reads its controls through
-UI Automation. Your pointer and keyboard are left alone, and nothing
-appears on screen.
+`PrintWindow`, and reads its controls through UI Automation. Your pointer
+and keyboard are left alone, and nothing appears on screen.
 
-Classic Win32 apps, console windows, and Chromium-based browsers draw,
-publish their controls, and take posted clicks and typing there. WinUI
-apps, such as Task Manager, and WPF apps draw and publish their controls,
-so `wait_for` and `expect` work, but they ignore posted clicks and keys.
-Packaged (Store) apps, launched through the shell, open on your own
-desktop rather than the private one. Use `--screen` for both.
+There is no real input on a desktop nothing shows, and many apps ignore
+input posted to their windows, so clicks and typing act on controls
+through UI Automation: a click presses the button, selects the item,
+toggles the box, or focuses the field under the pointer, and typing adds
+each character to the focused field. What UI Automation cannot do, such as
+typing into a console, is posted instead. Console windows, Chromium-based
+browsers, and WinUI apps such as Task Manager work this way. Keys other than typed characters, such as Enter, Tab, and
+shortcuts, are only posted, which WinUI and WPF apps ignore: click into a
+field rather than reaching it by shortcut, or use `--screen`. Typing adds
+to the end of a field; it does not insert, select, or delete.
+
+WPF apps draw nothing on a private desktop, unless the app renders in
+software. Packaged (Store) apps, launched through the shell, open on your
+own desktop rather than the private one. Use `--screen` for both.
 
 matinee places only the windows an app shows. Launched apps, and
 everything they start, run in a job that ends them when the session ends,

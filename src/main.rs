@@ -46,7 +46,7 @@ options:
           never waits for the window
   --screen  on Windows, with run, record, snapshot, or probe, open apps on
           your own screen instead of a private desktop, for packaged (Store)
-          apps and apps that ignore posted input, such as WinUI and WPF ones;
+          apps and apps that need the screen to draw, such as WPF ones;
           matinee takes the pointer and keyboard while it runs";
 
 /// Set by `--no-isolation`: run stories on the host, without namespaces.

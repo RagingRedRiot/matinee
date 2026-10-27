@@ -12,6 +12,10 @@
 
 use super::wm;
 use crate::platform::Node;
+use windows::Win32::UI::Accessibility::{
+    IUIAutomationInvokePattern, IUIAutomationSelectionItemPattern, IUIAutomationTogglePattern,
+    UIA_InvokePatternId, UIA_SelectionItemPatternId, UIA_TogglePatternId,
+};
 use windows::Win32::{
     Foundation::RPC_E_CHANGED_MODE,
     System::Com::{CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx},
@@ -41,6 +45,8 @@ const MAX_NODES: usize = 5000;
 
 pub struct A11y {
     automation: IUIAutomation,
+    /// The field the last press focused, which typing goes into.
+    field: std::cell::RefCell<Option<IUIAutomationElement>>,
 }
 
 /// An app with windows on the session's desktop.
@@ -64,7 +70,10 @@ impl A11y {
             let automation: IUIAutomation =
                 CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
                     .map_err(|e| std::io::Error::other(format!("UI Automation: {e}")))?;
-            Ok(A11y { automation })
+            Ok(A11y {
+                automation,
+                field: Default::default(),
+            })
         }
     }
 
@@ -82,6 +91,86 @@ impl A11y {
             });
         }
         apps
+    }
+
+    /// Act on the control at `(x, y)`, in device pixels on the desktop, as
+    /// a click on it would: press a button, select an item, toggle a box,
+    /// or focus a field for typing. The smallest control there that can do
+    /// one of these acts, found through the same tree the session's steps
+    /// target, which reaches controls a lookup by point does not, such as
+    /// a search box hosted in a window of its own. Whether one did.
+    pub fn press_at(&self, x: i32, y: i32) -> bool {
+        let Ok(walker) = (unsafe { self.automation.ControlViewWalker() }) else {
+            return false;
+        };
+        let mut found: Vec<(i64, IUIAutomationElement)> = Vec::new();
+        for hwnd in wm::app_windows_here() {
+            let handle = windows::Win32::Foundation::HWND(hwnd);
+            if let Ok(root) = unsafe { self.automation.ElementFromHandle(handle) } {
+                let mut seen = 0;
+                under(&walker, &root, (x, y), &mut seen, &mut found);
+            }
+        }
+        found.sort_by_key(|(area, _)| *area);
+        found.iter().any(|(_, element)| self.act(element))
+    }
+
+    fn act(&self, element: &IUIAutomationElement) -> bool {
+        unsafe {
+            let editable = element
+                .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+                .is_ok_and(|value| {
+                    !value
+                        .CurrentIsReadOnly()
+                        .map(|b| b.as_bool())
+                        .unwrap_or(true)
+                });
+            if editable {
+                let _ = element.SetFocus();
+                *self.field.borrow_mut() = Some(element.clone());
+                return true;
+            }
+            if let Ok(invoke) =
+                element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
+            {
+                return invoke.Invoke().is_ok();
+            }
+            if let Ok(item) = element.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
+                UIA_SelectionItemPatternId,
+            ) {
+                return item.Select().is_ok();
+            }
+            if let Ok(toggle) =
+                element.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
+            {
+                return toggle.Toggle().is_ok();
+            }
+        }
+        false
+    }
+
+    /// Type `c` at the end of the field the last press focused. Whether
+    /// there was one to type into.
+    pub fn type_char(&self, c: char) -> bool {
+        let field = self.field.borrow();
+        let Some(element) = field.as_ref() else {
+            return false;
+        };
+        unsafe {
+            let Ok(value) =
+                element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+            else {
+                return false;
+            };
+            let mut text = value
+                .CurrentValue()
+                .map(|b| b.to_string())
+                .unwrap_or_default();
+            text.push(c);
+            value
+                .SetValue(&windows::core::BSTR::from(text.as_str()))
+                .is_ok()
+        }
     }
 
     /// The control-view nodes of every window the app owns, depth-first.
@@ -111,6 +200,39 @@ impl A11y {
             }
         }
         out
+    }
+}
+
+/// Add `element` and every control-view descendant whose bounds hold
+/// `point` to `found`, each with its area, smallest first once sorted.
+/// Bounds that miss the point prune their subtree; empty ones do not, since
+/// some containers report none.
+fn under(
+    walker: &IUIAutomationTreeWalker,
+    element: &IUIAutomationElement,
+    point: (i32, i32),
+    seen: &mut usize,
+    found: &mut Vec<(i64, IUIAutomationElement)>,
+) {
+    *seen += 1;
+    if *seen > MAX_NODES {
+        return;
+    }
+    if let Ok(r) = unsafe { element.CurrentBoundingRectangle() } {
+        let (w, h) = (r.right - r.left, r.bottom - r.top);
+        if w > 0 && h > 0 {
+            let inside =
+                (r.left..r.right).contains(&point.0) && (r.top..r.bottom).contains(&point.1);
+            if !inside {
+                return;
+            }
+            found.push((w as i64 * h as i64, element.clone()));
+        }
+    }
+    let mut child = unsafe { walker.GetFirstChildElement(element) };
+    while let Ok(node) = child {
+        under(walker, &node, point, seen, found);
+        child = unsafe { walker.GetNextSiblingElement(&node) };
     }
 }
 

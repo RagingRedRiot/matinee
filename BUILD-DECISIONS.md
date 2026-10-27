@@ -272,8 +272,11 @@ a runtime dependency.
   launching apps onto a private desktop of the session's own, in a job
   that ends them with the session, placing and capturing each window with
   `PrintWindow`, posting them input, and reading their UI Automation trees
-  for named targets. Packaged apps, which Windows opens on the user's own
-  desktop, and WinUI and WPF apps, which ignore posted input, need `--screen`
+  for named targets. Clicks and typed characters act on controls through
+  UI Automation, since many apps, WinUI and WPF ones among them, ignore
+  posted input; what UI Automation cannot do is posted. Packaged apps,
+  which Windows opens on the user's own desktop, and WPF apps, which draw
+  nothing there unless they render in software, need `--screen`
   instead: apps open on the user's screen and take real input through the
   input queue, sent only when it lands on the story's windows, and
   packaged apps start through the shell by app ID. The boundary is a fresh

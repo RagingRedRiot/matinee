@@ -31,6 +31,13 @@ pub struct Display {
     /// Whether apps run on the user's screen rather than a private desktop:
     /// input then goes through the real input queue.
     screen: bool,
+    /// On a private desktop, UI Automation, through which clicks and typed
+    /// characters act on controls directly: many apps, such as WinUI and
+    /// WPF ones, ignore posted input. What it cannot act on is posted.
+    uia_input: Option<A11y>,
+    /// Whether the left button's press went through UI Automation, so its
+    /// release does too.
+    uia_pressed: bool,
     /// The screen size in logical points.
     size: (u32, u32),
     /// Device pixels per point.
@@ -77,9 +84,12 @@ impl Display {
             }
         }
         let desktop = wm::Desktop::create(screen)?;
+        let uia_input = if screen { None } else { A11y::connect().ok() };
         Ok(Display {
             _desktop: desktop,
             screen,
+            uia_input,
+            uia_pressed: false,
             size: (w, h),
             scale: story.demo.scale,
             area: (0, 0, w as i32, h as i32),
@@ -266,6 +276,17 @@ impl Display {
             self.buttons &= !flag;
         }
         let (px, py) = self.pointer;
+        if let (Some(a11y), Button::Left) = (&self.uia_input, button) {
+            let s = self.scale as f64;
+            if pressed && a11y.press_at((px * s).round() as i32, (py * s).round() as i32) {
+                self.uia_pressed = true;
+                return;
+            }
+            if !pressed && self.uia_pressed {
+                self.uia_pressed = false;
+                return;
+            }
+        }
         if self.screen {
             input::send_pointer_button(
                 px * self.scale as f64,
@@ -311,6 +332,13 @@ impl Display {
     /// nothing.
     pub fn key(&mut self, keycode: u32, pressed: bool, _time: Duration) {
         let _ = self.modifiers.apply(keycode, pressed);
+        if let (Some(a11y), true) = (&self.uia_input, pressed) {
+            if let Some(c) = input::char_for(keycode, self.modifiers) {
+                if a11y.type_char(c) {
+                    return;
+                }
+            }
+        }
         if self.screen {
             input::send_key(wm::app_windows_here().first().copied(), keycode, pressed);
             return;

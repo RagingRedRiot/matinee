@@ -5,7 +5,9 @@
 //! queue would have delivered: a pointer event to the deepest child window
 //! under the pointer, in its client coordinates, and a key event to the
 //! window with keyboard focus. Modifier state is set on the app's thread
-//! through an attached input queue, since a posted key carries none.
+//! through an attached input queue, since a posted key carries none. Many
+//! apps ignore posted input, so the display first acts on the control
+//! through UI Automation, and posts only what that cannot do.
 //!
 //! On the screen (`--screen`) apps take real input, and many modern
 //! ones read nothing else, so the `send_` functions put events through the
@@ -424,6 +426,33 @@ pub fn key(top: HWND, code: u32, pressed: bool, modifiers: Modifiers) {
         }
         AttachThreadInput(GetCurrentThreadId(), thread, 0);
     }
+}
+
+/// The character the key with Linux input code `code` types with
+/// `modifiers` held, if it types one: none with Ctrl, Alt, or the logo key.
+pub fn char_for(code: u32, modifiers: Modifiers) -> Option<char> {
+    if modifiers.ctrl || modifiers.alt || modifiers.meta {
+        return None;
+    }
+    let (vk, _) = virtual_key(code)?;
+    let mut state = [0u8; 256];
+    if modifiers.shift {
+        state[VK_SHIFT as usize] = 0x80;
+    }
+    let mut buf = [0u16; 8];
+    let n = unsafe {
+        ToUnicode(
+            vk as u32,
+            MapVirtualKeyW(vk as u32, 0),
+            state.as_ptr(),
+            buf.as_mut_ptr(),
+            buf.len() as i32,
+            4, // do not disturb the real keyboard state
+        )
+    };
+    (n == 1 && buf[0] >= 0x20)
+        .then(|| char::from_u32(buf[0] as u32))
+        .flatten()
 }
 
 /// The virtual key for a Linux input code, and whether Windows calls it

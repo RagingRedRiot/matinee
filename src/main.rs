@@ -283,7 +283,7 @@ fn shell(path: &str, command: &[String]) -> ExitCode {
         session.run(|| {
             let (program, args) = match command.split_first() {
                 Some((program, args)) => (program.as_str(), args),
-                None => ("bash", &[][..]),
+                None => (matinee::platform::SHELL, &[][..]),
             };
             match session.command(program).args(args).status() {
                 Ok(status) => status.code().unwrap_or(1),

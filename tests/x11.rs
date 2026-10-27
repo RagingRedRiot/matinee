@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! Apps under Xwayland: an X11-only Tk window, and a Qt 5 window targeted
 //! by name. Ignored by default: they need Xwayland, Python's Tk, a C++
 //! compiler, and Qt 5 headers. Run them with `cargo test -- --ignored`.

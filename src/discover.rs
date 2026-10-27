@@ -84,6 +84,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_folder_is_searched_and_a_file_is_taken_as_given() {
         let root = std::env::temp_dir().join(format!("matinee-find-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);

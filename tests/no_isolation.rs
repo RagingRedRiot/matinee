@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! `--no-isolation`: stories on the host, for systems without unprivileged
 //! user namespaces. What isolation adds is checked in `boundary.rs`; these
 //! check what must hold either way.

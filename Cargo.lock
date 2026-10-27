@@ -635,6 +635,7 @@ dependencies = [
  "vt100",
  "wayland-client",
  "wayland-protocols",
+ "windows-sys",
  "zbus",
 ]
 

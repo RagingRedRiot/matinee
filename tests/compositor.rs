@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! The built-in compositor, driven by a small Wayland client in a thread.
 
 use matinee::platform::{Button, Window, compositor::Compositor};

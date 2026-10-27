@@ -11,7 +11,12 @@ pub mod portal;
 mod shell;
 pub mod viewport;
 
-pub use a11y::{A11y, App, Node, in_points};
+pub use a11y::{A11y, App};
 pub use boundary::Boundary;
 pub use display::Display;
 pub use shell::Shell;
+
+/// The shell `matinee shell` runs by default, and the one seeds use.
+pub const SHELL: &str = "bash";
+/// What the terminal pane's prompt shows before each command.
+pub const PROMPT_CHAR: &str = "$";

@@ -9,7 +9,7 @@
 
 use crate::{
     frame::Frame,
-    platform::{Boundary, Shell},
+    platform::{Boundary, PROMPT_CHAR, Shell},
     story::Theme,
 };
 use std::{
@@ -21,8 +21,11 @@ use std::{
 const REGULAR: &[u8] = include_bytes!("../assets/fonts/DejaVuSansMono.ttf");
 pub(crate) const BOLD: &[u8] = include_bytes!("../assets/fonts/DejaVuSansMono-Bold.ttf");
 
-/// The prompt matinee draws before each command: a bold cyan `$`.
-const PROMPT: &str = "\x1b[1;36m$\x1b[0m ";
+/// The prompt matinee draws before each command: the platform's prompt
+/// character in bold cyan.
+fn prompt() -> String {
+    format!("\x1b[1;36m{}\x1b[0m ", PROMPT_CHAR)
+}
 
 pub struct Terminal {
     screen: Arc<Mutex<vt100::Parser>>,
@@ -41,7 +44,7 @@ impl Terminal {
         let screen = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
         let shell = Shell::start(boundary, rows, cols, env, screen.clone())?;
         let terminal = Terminal { screen, shell };
-        terminal.show(PROMPT);
+        terminal.show(&prompt());
         Ok(terminal)
     }
 
@@ -66,7 +69,7 @@ impl Terminal {
         if column != 0 {
             self.show("\r\n");
         }
-        self.show(PROMPT);
+        self.show(&prompt());
     }
 
     /// Send keys to whatever is running in the terminal.

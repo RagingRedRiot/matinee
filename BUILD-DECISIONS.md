@@ -267,4 +267,6 @@ a runtime dependency.
   compile time, behind the same names: a display that renders frames and
   takes input, a boundary that runs commands, an accessibility tree, and a
   shell. The storyboard, session, runner, camera, overlays, and encoder are
-  the same everywhere. Linux is the only platform today.
+  the same everywhere. Linux has the full pipeline. Windows runs terminal
+  stories: PowerShell on a pseudo console, a fresh profile in place of
+  isolation, and no app windows yet.

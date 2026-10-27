@@ -974,6 +974,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn a_long_list_of_names_points_at_probe() {
         let app = App {
             bus: ":1.1".into(),
@@ -1015,6 +1016,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_process_descends_from_itself_and_its_parent() {
         let me = std::process::id();
         let parent = std::os::unix::process::parent_id();

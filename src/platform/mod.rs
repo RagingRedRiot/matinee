@@ -5,13 +5,20 @@
 //! and the encoder, is the same on every platform.
 //!
 //! Each platform provides the same names with the same shapes, selected at
-//! compile time, the way the standard library does. Linux is the only
-//! platform today.
+//! compile time, the way the standard library does. Linux has the full
+//! pipeline; Windows runs terminal stories so far.
 
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::*;
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub use windows::*;
+
+mod tree;
+pub use tree::{Node, in_points};
 
 /// A top-level window on the display.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! Accessibility trees through the session's buses. These launch a real
 //! GTK app, so they are ignored by default: run them with
 //! `cargo test -- --ignored` on a machine with gnome-calculator.

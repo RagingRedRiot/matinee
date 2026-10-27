@@ -1,0 +1,24 @@
+# A terminal-only demo on Windows: a real command, a staged one that shows
+# `gh` while reading a fixture, canned output, and a command expected to
+# fail. Commands are PowerShell.
+
+[demo]
+output = "powershell"
+size = [800, 400]
+
+[terminal]
+font_size = 18
+
+[[seed]]
+run = "New-Item -ItemType Directory -Force ~/notes | Out-Null; Set-Content ~/notes/todo.txt \"buy milk`nrecord the demo\""
+
+[[scene]]
+steps = [
+  { run = "Get-Content ~/notes/todo.txt", hold = "1s" },
+  { expect = "record the demo" },
+  # shown in the terminal / actually run
+  { terminal = "gh pr list --author @me", run = "Get-Content fixtures/prs.txt", hold = "1.5s" },
+  { expect = "Fix flaky upload retry" },
+  { terminal = "gh auth status", output = "fixtures/auth.txt", hold = "1.5s" },
+  { run = "cmd /c exit 1", exit = 1, hold = "1s" },
+]

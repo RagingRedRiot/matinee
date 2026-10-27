@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! `matinee record` over folders: finding storyboards, recording each, and
 //! refusing clashes. These start real sessions, with bash, dbus-daemon, and
 //! the AT-SPI registry from the host.

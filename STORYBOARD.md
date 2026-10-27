@@ -41,6 +41,8 @@ host paths. Here `~` means the host home; in commands it means the fresh session
 home. Network access needs `[session] network = true` and pasta.
 
 `[launch]` accepts `app`, `args`, `name`, `wait_for`, `timeout`, and `x11`.
+On Windows, `app` can also be a packaged app's ID, recorded with `--screen`;
+see [docs/windows.md](docs/windows.md).
 Use `[[launch]]` for multiple apps and `in = "launch-name"` in named steps.
 Set `x11 = true` only for a launch needing Xwayland. Omit launches for a
 terminal-only story.

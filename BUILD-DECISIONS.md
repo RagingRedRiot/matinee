@@ -269,11 +269,15 @@ a runtime dependency.
   shell. The storyboard, session, runner, camera, overlays, and encoder are
   the same everywhere. Linux has the full pipeline. Windows runs terminal
   stories through PowerShell on a pseudo console, and GUI stories by
-  launching apps onto a private desktop of the session's own, placing and
-  capturing each window with `PrintWindow`, posting them input, and reading
-  their UI Automation trees for named targets. The boundary is a fresh
+  launching apps onto a private desktop of the session's own, in a job
+  that ends them with the session, placing and capturing each window with
+  `PrintWindow`, posting them input, and reading their UI Automation trees
+  for named targets. Packaged apps, which Windows opens on the user's own
+  desktop, and WinUI and WPF apps, which ignore posted input, need `--screen`
+  instead: apps open on the user's screen and take real input through the
+  input queue, sent only when it lands on the story's windows, and
+  packaged apps start through the shell by app ID. The boundary is a fresh
   profile, not yet isolation. Still missing on Windows: driving the system
-  theme, so light and dark look alike; a canvas larger than the app for the
-  zoom camera, so stories record at one pixel per point; and packaged (UWP
-  or WinUI) apps, which open on the user's own desktop instead of the
-  session's.
+  theme, so light and dark look alike; and a canvas larger than the app
+  for the zoom camera, so stories record at one pixel per point.
+  [docs/windows.md](docs/windows.md) is the guide.

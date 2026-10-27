@@ -43,24 +43,32 @@ options:
   --view  with run or record, show the session in a window on your Wayland
           desktop as it runs, with the camera's view outlined and the
           pointer, but not captions, click ripples, or key badges; the run
-          never waits for the window";
+          never waits for the window
+  --screen  on Windows, with run, record, snapshot, or probe, open apps on
+          your own screen instead of a private desktop, for packaged (Store)
+          apps and apps that ignore posted input, such as WinUI and WPF ones;
+          matinee takes the pointer and keyboard while it runs";
 
 /// Set by `--no-isolation`: run stories on the host, without namespaces.
 static NO_ISOLATION: AtomicBool = AtomicBool::new(false);
 /// Set by `--view`: show the session in a window while it runs.
 static VIEW: AtomicBool = AtomicBool::new(false);
+/// Set by `--screen`: open apps on the user's screen, not a private desktop.
+static SCREEN: AtomicBool = AtomicBool::new(false);
 /// Set by `--fixed-too`: also write a fixed-camera GIF of each recording.
 static FIXED_TOO: AtomicBool = AtomicBool::new(false);
 static ARTIFACTS: OnceLock<PathBuf> = OnceLock::new();
 
 /// The boundary a command runs `story` in, isolated unless asked not to be.
 fn boundary_for(story: &Story, work: &std::path::Path) -> std::io::Result<Boundary> {
-    let boundary = Boundary::for_story(story, work)?;
+    let mut boundary = Boundary::for_story(story, work)?;
     if NO_ISOLATION.load(Ordering::Relaxed) {
-        boundary.without_isolation()
-    } else {
-        Ok(boundary)
+        boundary = boundary.without_isolation()?;
     }
+    if SCREEN.load(Ordering::Relaxed) {
+        boundary = boundary.on_screen()?;
+    }
+    Ok(boundary)
 }
 
 fn main() -> ExitCode {
@@ -75,7 +83,12 @@ fn main() -> ExitCode {
         args.drain(at..at + 2);
         if !matches!(
             args.iter()
-                .find(|a| !matches!(a.as_str(), "--no-isolation" | "--view" | "--fixed-too"))
+                .find(|a| {
+                    !matches!(
+                        a.as_str(),
+                        "--no-isolation" | "--view" | "--fixed-too" | "--screen"
+                    )
+                })
                 .map(String::as_str),
             Some("run" | "record")
         ) {
@@ -118,6 +131,24 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
         VIEW.store(true, Ordering::Relaxed);
+    }
+    let end = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    if let Some(at) = args[..end].iter().position(|a| a == "--screen") {
+        args.remove(at);
+        if !matches!(
+            args.first().map(String::as_str),
+            Some("run" | "record" | "snapshot" | "probe")
+        ) {
+            eprintln!("matinee: --screen applies to run, record, snapshot, and probe\n{USAGE}");
+            return ExitCode::from(2);
+        }
+        SCREEN.store(true, Ordering::Relaxed);
+        if cfg!(windows) {
+            eprintln!(
+                "matinee: running on your screen: apps open on your own desktop, and matinee \
+                 moves the pointer and types while it runs; leave the mouse and keyboard alone"
+            );
+        }
     }
     let end = args.iter().position(|a| a == "--").unwrap_or(args.len());
     if let Some(at) = args[..end].iter().position(|a| a == "--fixed-too") {

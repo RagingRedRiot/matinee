@@ -6,6 +6,13 @@
 //! under the pointer, in its client coordinates, and a key event to the
 //! window with keyboard focus. Modifier state is set on the app's thread
 //! through an attached input queue, since a posted key carries none.
+//!
+//! On the screen (`--screen`) apps take real input, and many modern
+//! ones read nothing else, so the `send_` functions put events through the
+//! input queue as a mouse and keyboard would. A press only goes out when
+//! what it lands on is one of the session's windows, so a user's window
+//! that comes to the front never receives a click or a keystroke meant for
+//! the app; releases always go out, so nothing is left held down.
 
 use super::wm;
 use windows_sys::Win32::{
@@ -14,15 +21,22 @@ use windows_sys::Win32::{
     System::Threading::{AttachThreadInput, GetCurrentThreadId},
     UI::{
         Input::KeyboardAndMouse::{
-            GetKeyboardState, MapVirtualKeyW, SetActiveWindow, SetKeyboardState, ToUnicode,
+            GetKeyboardState, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
+            KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
+            MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE,
+            MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL,
+            MOUSEINPUT, MapVirtualKeyW, SendInput, SetActiveWindow, SetKeyboardState, ToUnicode,
             VK_CONTROL, VK_LWIN, VK_MENU, VK_SHIFT,
         },
         WindowsAndMessaging::{
-            CWP_SKIPDISABLED, CWP_SKIPINVISIBLE, CWP_SKIPTRANSPARENT, ChildWindowFromPointEx,
-            GUITHREADINFO, GetGUIThreadInfo, HWND_TOP, PostMessageW, SWP_NOACTIVATE, SWP_NOMOVE,
-            SWP_NOSIZE, SetWindowPos, WM_CHAR, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
-            WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
-            WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+            BringWindowToTop, CWP_SKIPDISABLED, CWP_SKIPINVISIBLE, CWP_SKIPTRANSPARENT,
+            ChildWindowFromPointEx, GA_ROOT, GUITHREADINFO, GetAncestor, GetForegroundWindow,
+            GetGUIThreadInfo, GetSystemMetrics, GetWindowThreadProcessId, HWND_TOP, PostMessageW,
+            SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+            SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetForegroundWindow, SetWindowPos, WM_CHAR,
+            WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
+            WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+            WindowFromPoint,
         },
     },
 };
@@ -167,6 +181,154 @@ pub fn focus_in(top: HWND) -> HWND {
         info.hwndFocus
     } else {
         top
+    }
+}
+
+/// Move the real pointer to `(x, y)`, in device pixels on the screen.
+pub fn send_pointer_move(x: f64, y: f64) {
+    let (vx, vy, vw, vh) = unsafe {
+        (
+            GetSystemMetrics(SM_XVIRTUALSCREEN),
+            GetSystemMetrics(SM_YVIRTUALSCREEN),
+            GetSystemMetrics(SM_CXVIRTUALSCREEN).max(2),
+            GetSystemMetrics(SM_CYVIRTUALSCREEN).max(2),
+        )
+    };
+    // Absolute positions run from 0 to 65535 across the virtual screen.
+    let nx = ((x - vx as f64) * 65535.0 / (vw - 1) as f64).round() as i32;
+    let ny = ((y - vy as f64) * 65535.0 / (vh - 1) as f64).round() as i32;
+    send_mouse(
+        nx,
+        ny,
+        0,
+        MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+    );
+}
+
+/// Press or release `button` at `(x, y)` on the screen.
+pub fn send_pointer_button(x: f64, y: f64, button: crate::platform::Button, pressed: bool) {
+    use crate::platform::Button;
+    if pressed {
+        let p = POINT {
+            x: x.round() as i32,
+            y: y.round() as i32,
+        };
+        let top = unsafe { GetAncestor(WindowFromPoint(p), GA_ROOT) };
+        if top.is_null() || !wm::is_session_window(top) {
+            eprintln!(
+                "matinee: warning: something not of this story is at {},{} on the screen, so \
+                 the press was not sent",
+                p.x, p.y
+            );
+            return;
+        }
+    }
+    send_pointer_move(x, y);
+    let flag = match (button, pressed) {
+        (Button::Left, true) => MOUSEEVENTF_LEFTDOWN,
+        (Button::Left, false) => MOUSEEVENTF_LEFTUP,
+        (Button::Right, true) => MOUSEEVENTF_RIGHTDOWN,
+        (Button::Right, false) => MOUSEEVENTF_RIGHTUP,
+        (Button::Middle, true) => MOUSEEVENTF_MIDDLEDOWN,
+        (Button::Middle, false) => MOUSEEVENTF_MIDDLEUP,
+    };
+    send_mouse(0, 0, 0, flag);
+}
+
+/// Scroll by `dy` points with the real wheel; positive scrolls down. Only
+/// over the session's windows.
+pub fn send_pointer_scroll(x: f64, y: f64, dy: f64) {
+    let p = POINT {
+        x: x.round() as i32,
+        y: y.round() as i32,
+    };
+    let top = unsafe { GetAncestor(WindowFromPoint(p), GA_ROOT) };
+    if top.is_null() || !wm::is_session_window(top) {
+        return;
+    }
+    let delta = (-dy / 15.0 * 120.0).round() as i32;
+    send_mouse(0, 0, delta as u32, MOUSEEVENTF_WHEEL);
+}
+
+/// Press or release the key with Linux input code `code` on the real
+/// keyboard, into `top` (the session's top window), brought to the front
+/// first if it is not already.
+pub fn send_key(top: Option<HWND>, code: u32, pressed: bool) {
+    let Some((vk, extended)) = virtual_key(code) else {
+        return;
+    };
+    if pressed {
+        let foreground = |h: HWND| !h.is_null() && wm::is_session_window(h);
+        let mut current = unsafe { GetAncestor(GetForegroundWindow(), GA_ROOT) };
+        if let (false, Some(top)) = (foreground(current), top) {
+            bring_forward(top);
+            current = unsafe { GetAncestor(GetForegroundWindow(), GA_ROOT) };
+        }
+        if !foreground(current) {
+            eprintln!(
+                "matinee: warning: none of this story's windows has the keyboard, so the key \
+                 was not sent"
+            );
+            return;
+        }
+    }
+    let mut flags = if pressed { 0 } else { KEYEVENTF_KEYUP };
+    if extended {
+        flags |= KEYEVENTF_EXTENDEDKEY;
+    }
+    let input = INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: vk,
+                wScan: unsafe { MapVirtualKeyW(vk as u32, 0) } as u16,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    unsafe { SendInput(1, &input, std::mem::size_of::<INPUT>() as i32) };
+}
+
+fn send_mouse(dx: i32, dy: i32, data: u32, flags: u32) {
+    let input = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx,
+                dy,
+                mouseData: data,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    unsafe { SendInput(1, &input, std::mem::size_of::<INPUT>() as i32) };
+}
+
+/// Bring `top` to the front of the screen and give it the keyboard.
+/// Windows lets only the foreground's own input queue change the
+/// foreground, so matinee joins that queue while it asks.
+pub fn bring_forward(top: HWND) {
+    unsafe {
+        let current = GetForegroundWindow();
+        let thread = if current.is_null() {
+            0
+        } else {
+            GetWindowThreadProcessId(current, std::ptr::null_mut())
+        };
+        let me = GetCurrentThreadId();
+        let attach = thread != 0 && thread != me;
+        if attach {
+            AttachThreadInput(me, thread, 1);
+        }
+        BringWindowToTop(top);
+        SetForegroundWindow(top);
+        if attach {
+            AttachThreadInput(me, thread, 0);
+        }
     }
 }
 

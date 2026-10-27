@@ -205,6 +205,14 @@ impl Boundary {
         Ok(self)
     }
 
+    /// There is no screen to run on: a session always draws on its own
+    /// compositor, which shows every app.
+    pub fn on_screen(self) -> io::Result<Boundary> {
+        Err(io::Error::other(
+            "--screen is for Windows; on Linux every app runs in the session's own compositor",
+        ))
+    }
+
     /// Whether the work runs inside namespaces.
     pub fn is_isolated(&self) -> bool {
         self.isolated

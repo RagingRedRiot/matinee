@@ -15,17 +15,22 @@ use crate::{
     story::{Story, Theme},
 };
 use std::{collections::HashSet, io, time::Duration};
-use windows_sys::Win32::UI::HiDpi::{
-    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
+use windows_sys::Win32::UI::{
+    HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext},
+    WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN},
 };
 
 /// The desktop background behind windows, the same gray as on Linux.
 const BACKGROUND: u32 = 0xff80_8c8c;
 
 pub struct Display {
-    /// The private desktop. Held for its lifetime: dropping it returns the
-    /// thread to its old desktop and closes this one.
+    /// Where the apps run: the private desktop, or the screen. Held for its
+    /// lifetime: dropping it ends the session's apps, and returns the
+    /// thread from a private desktop to its old one and closes it.
     _desktop: wm::Desktop,
+    /// Whether apps run on the user's screen rather than a private desktop:
+    /// input then goes through the real input queue.
+    screen: bool,
     /// The screen size in logical points.
     size: (u32, u32),
     /// Device pixels per point.
@@ -48,18 +53,33 @@ pub struct Display {
 impl Display {
     /// Start the display for `story` in `theme`: make the session's private
     /// desktop and move this thread onto it, so the apps it launches open
-    /// their windows there.
-    pub fn start(_boundary: &Boundary, story: &Story, theme: Theme) -> io::Result<Display> {
+    /// their windows there, or, with `--screen`, use the user's screen.
+    pub fn start(boundary: &Boundary, story: &Story, theme: Theme) -> io::Result<Display> {
         // Without this, Windows scales what a DPI-unaware process sees on a
         // scaled display, and only some of it: window rectangles, captures,
         // and UI Automation would disagree about where a window is.
         unsafe {
             SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         }
-        let desktop = wm::Desktop::create()?;
         let [w, h] = story.demo.size;
+        let screen = boundary.is_on_screen();
+        if screen {
+            // Windows are laid out from the screen's top-left corner, so the
+            // whole frame must be on it.
+            let (sw, sh) =
+                unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
+            let (fw, fh) = ((w * story.demo.scale) as i32, (h * story.demo.scale) as i32);
+            if fw > sw || fh > sh {
+                return Err(io::Error::other(format!(
+                    "the story's {fw}x{fh} pixel screen does not fit on your {sw}x{sh} screen; \
+                     make demo.size or demo.scale smaller"
+                )));
+            }
+        }
+        let desktop = wm::Desktop::create(screen)?;
         Ok(Display {
             _desktop: desktop,
+            screen,
             size: (w, h),
             scale: story.demo.scale,
             area: (0, 0, w as i32, h as i32),
@@ -96,14 +116,14 @@ impl Display {
     fn place_new_windows(&mut self) {
         let (ax, ay, aw, ah) = self.area;
         let s = self.scale as i32;
-        for hwnd in wm::hidden_app_windows_here() {
+        // Only windows the app has shown. Apps keep hidden windows of their
+        // own, such as Chromium's full-size one and Task Manager's tray
+        // window, which shown would cover the app.
+        for hwnd in wm::app_windows_here() {
             let id = hwnd as isize;
             if self.placed.contains(&id) {
                 continue;
             }
-            // Apps may create a window hidden on a desktop no one is
-            // watching; matinee reveals it so it can be captured.
-            wm::show(hwnd);
             if wm::is_owned(hwnd) {
                 // A dialog keeps its own size, centered in the area.
                 let r = wm::visible_rect(hwnd);
@@ -114,6 +134,11 @@ impl Display {
                 // A top-level window fills the area, as the Linux compositor
                 // tiles one, so a demo frames the app the same way.
                 wm::place(hwnd, ax * s, ay * s, Some((aw * s, ah * s)));
+            }
+            if self.screen {
+                // Above the user's own windows, so what is drawn and what
+                // takes input is the app.
+                input::bring_forward(hwnd);
             }
             self.placed.insert(id);
         }
@@ -176,7 +201,7 @@ impl Display {
         for &hwnd in apps.iter().rev() {
             let r = wm::visible_rect(hwnd);
             let title = wm::title(hwnd);
-            let app_id = wm::program_name(wm::process_of(hwnd));
+            let app_id = wm::program_name(wm::app_of(hwnd));
             let x = r.left / s;
             let y = r.top / s;
             let width = (r.right - r.left) / s;
@@ -219,7 +244,12 @@ impl Display {
     /// coordinate times [`Display::scale`]) and [`Display::buttons`].
     pub fn pointer_move(&mut self, x: f64, y: f64, _time: Duration) {
         self.pointer = (x, y);
-        input::pointer_move(x * self.scale as f64, y * self.scale as f64, self.buttons);
+        let (px, py) = (x * self.scale as f64, y * self.scale as f64);
+        if self.screen {
+            input::send_pointer_move(px, py);
+        } else {
+            input::pointer_move(px, py, self.buttons);
+        }
     }
 
     /// Press or release a pointer button where the pointer is.
@@ -236,6 +266,15 @@ impl Display {
             self.buttons &= !flag;
         }
         let (px, py) = self.pointer;
+        if self.screen {
+            input::send_pointer_button(
+                px * self.scale as f64,
+                py * self.scale as f64,
+                button,
+                pressed,
+            );
+            return;
+        }
         input::pointer_button(
             px * self.scale as f64,
             py * self.scale as f64,
@@ -251,6 +290,10 @@ impl Display {
     /// device pixels, `dy` unchanged, and [`Display::buttons`].
     pub fn pointer_scroll(&mut self, dy: f64, _time: Duration) {
         let (px, py) = self.pointer;
+        if self.screen {
+            input::send_pointer_scroll(px * self.scale as f64, py * self.scale as f64, dy);
+            return;
+        }
         input::pointer_scroll(
             px * self.scale as f64,
             py * self.scale as f64,
@@ -268,6 +311,10 @@ impl Display {
     /// nothing.
     pub fn key(&mut self, keycode: u32, pressed: bool, _time: Duration) {
         let _ = self.modifiers.apply(keycode, pressed);
+        if self.screen {
+            input::send_key(wm::app_windows_here().first().copied(), keycode, pressed);
+            return;
+        }
         if let Some(top) = wm::app_windows_here().first().cloned() {
             input::key(top, keycode, pressed, self.modifiers);
         }

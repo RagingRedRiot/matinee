@@ -72,7 +72,7 @@ impl A11y {
     pub fn apps(&self) -> Vec<App> {
         let mut apps: Vec<App> = Vec::new();
         for hwnd in wm::app_windows_here() {
-            let pid = wm::process_of(hwnd);
+            let pid = wm::app_of(hwnd);
             if apps.iter().any(|a| a.pid == pid) {
                 continue;
             }
@@ -92,7 +92,7 @@ impl A11y {
         };
         let mut out = Vec::new();
         for hwnd in wm::app_windows_here() {
-            if wm::process_of(hwnd) != app.pid {
+            if wm::app_of(hwnd) != app.pid {
                 continue;
             }
             let handle = windows::Win32::Foundation::HWND(hwnd);

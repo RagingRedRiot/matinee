@@ -49,6 +49,8 @@ pub struct Boundary {
     /// The throwaway home and temp folders.
     home: PathBuf,
     runtime: PathBuf,
+    /// Whether apps run on the user's screen rather than a private desktop.
+    screen: bool,
 }
 
 impl Boundary {
@@ -89,12 +91,27 @@ impl Boundary {
             home: session.join("home"),
             runtime: session.join("run"),
             work_dir,
+            screen: false,
         })
     }
 
     /// There is no isolation to leave out on Windows.
     pub fn without_isolation(self) -> io::Result<Boundary> {
         Ok(self)
+    }
+
+    /// Run apps on the user's screen instead of a private desktop, for apps
+    /// a private desktop cannot hold: packaged apps, which Windows opens on
+    /// the user's own desktop, and apps that ignore posted input, such as
+    /// WinUI and WPF ones, which need the real input queue.
+    pub fn on_screen(mut self) -> io::Result<Boundary> {
+        self.screen = true;
+        Ok(self)
+    }
+
+    /// Whether apps run on the user's screen.
+    pub fn is_on_screen(&self) -> bool {
+        self.screen
     }
 
     /// Whether the work runs isolated from the host: never, yet.
@@ -181,7 +198,25 @@ impl Boundary {
         environment.extend(env.iter().cloned());
         let (desktop, job) = super::wm::session_desktop()
             .ok_or_else(|| io::Error::other(format!("{program}: no session desktop to open on")))?;
-        super::proc::spawn_on_desktop(&desktop, job, program, args, &environment, &self.story_dir)
+        if super::proc::is_app_id(program) {
+            if desktop.is_some() {
+                return Err(io::Error::other(format!(
+                    "{program}: a packaged app opens on your own desktop, never the session's \
+                     private one; record it with --screen"
+                )));
+            }
+            let child = super::proc::activate(program, args)?;
+            super::wm::adopt(child.id());
+            return Ok(child);
+        }
+        super::proc::spawn_on_desktop(
+            desktop.as_deref(),
+            job,
+            program,
+            args,
+            &environment,
+            &self.story_dir,
+        )
     }
 
     /// A command that runs `script` in the session's shell, as

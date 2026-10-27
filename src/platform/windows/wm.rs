@@ -30,6 +30,7 @@ use windows_sys::Win32::{
             CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
             TH32CS_SNAPPROCESS,
         },
+        JobObjects::IsProcessInJob,
         StationsAndDesktops::{
             CloseDesktop, CreateDesktopW, DF_ALLOWOTHERACCOUNTHOOK, EnumDesktopWindows,
             GetThreadDesktop, HDESK, SetThreadDesktop,
@@ -40,9 +41,10 @@ use windows_sys::Win32::{
         },
     },
     UI::WindowsAndMessaging::{
-        GW_OWNER, GWL_STYLE, GetClassNameW, GetWindow, GetWindowLongW, GetWindowRect,
-        GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, PW_RENDERFULLCONTENT, SW_SHOWNA,
-        SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos, ShowWindow, WS_CAPTION, WS_CHILD,
+        FindWindowExW, GW_OWNER, GWL_STYLE, GetClassNameW, GetWindow, GetWindowLongW,
+        GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
+        PW_RENDERFULLCONTENT, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos, WS_CAPTION,
+        WS_CHILD,
     },
 };
 
@@ -55,41 +57,128 @@ const POPUP_CLASSES: &[&str] = &["#32768", "tooltips_class32"];
 /// Sessions this process has made a desktop for, so each gets a new one.
 static SESSIONS: AtomicU32 = AtomicU32::new(0);
 
+/// The session this thread runs: the private desktop its apps open on, or
+/// `None` on the screen, where they open on the user's own; the job they
+/// go in; and the packaged apps Windows started for it outside the job.
+struct Current {
+    desktop: Option<String>,
+    job: HANDLE,
+    activated: Vec<u32>,
+}
+
 thread_local! {
-    /// The name of the session desktop this thread is on, and the job its
-    /// apps go in.
-    static CURRENT: RefCell<Option<(String, HANDLE)>> = const { RefCell::new(None) };
+    static CURRENT: RefCell<Option<Current>> = const { RefCell::new(None) };
 }
 
-/// The session desktop this thread is on, by name, and its job.
-pub fn session_desktop() -> Option<(String, HANDLE)> {
-    CURRENT.with(|c| c.borrow().clone())
+/// Where this thread's session opens apps, by desktop name (`None` on the
+/// screen), and the job they go in.
+pub fn session_desktop() -> Option<(Option<String>, HANDLE)> {
+    CURRENT.with(|c| c.borrow().as_ref().map(|s| (s.desktop.clone(), s.job)))
 }
 
-/// A desktop of the session's own, the job its apps run in, and the
-/// thread's way back from it.
+/// Count `pid`, a packaged app Windows started for the session, as one of
+/// the session's apps.
+pub fn adopt(pid: u32) {
+    CURRENT.with(|c| {
+        if let Some(s) = c.borrow_mut().as_mut() {
+            s.activated.push(pid);
+        }
+    });
+}
+
+/// Whether `hwnd` is one of the session's windows. On a private desktop
+/// every window is; on the screen, only those of the session's job and of
+/// the packaged apps it activated, so the user's own windows are never
+/// placed, drawn, targeted, or given input.
+pub fn is_session_window(hwnd: HWND) -> bool {
+    CURRENT.with(|c| {
+        let current = c.borrow();
+        let Some(s) = current.as_ref() else {
+            return false;
+        };
+        if s.desktop.is_some() {
+            return true;
+        }
+        let pid = app_of(hwnd);
+        s.activated.contains(&pid) || in_job(pid, s.job)
+    })
+}
+
+fn in_job(pid: u32, job: HANDLE) -> bool {
+    let process: HANDLE = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        return false;
+    }
+    let mut result = 0;
+    let ok = unsafe { IsProcessInJob(process, job, &mut result) };
+    unsafe { CloseHandle(process) };
+    ok != 0 && result != 0
+}
+
+/// The process whose app `hwnd` shows. A UWP app's window is a frame that
+/// `ApplicationFrameHost` draws around the app's own window, so the frame
+/// counts as the app inside it.
+pub fn app_of(hwnd: HWND) -> u32 {
+    if class_name(hwnd) == "ApplicationFrameWindow" {
+        let class: Vec<u16> = "Windows.UI.Core.CoreWindow"
+            .encode_utf16()
+            .chain([0])
+            .collect();
+        let inner = unsafe { FindWindowExW(hwnd, ptr::null_mut(), class.as_ptr(), ptr::null()) };
+        if !inner.is_null() {
+            return process_of(inner);
+        }
+    }
+    process_of(hwnd)
+}
+
+/// Where the session's apps run, the job they run in, and the thread's way
+/// back.
 ///
-/// Windows destroys a desktop once nothing holds it: not matinee, and no
-/// process running on it. Each session gets a desktop of its own, so an app
-/// that outlives one session never shows in the next, and the job ends the
+/// By default that is a desktop of the session's own, unseen. Windows
+/// destroys a desktop once nothing holds it: not matinee, and no process
+/// running on it. Each session gets a desktop of its own, so an app that
+/// outlives one session never shows in the next, and the job ends the
 /// session's apps, and whatever they started, with the session.
+///
+/// On the screen there is no desktop to make: apps open on the user's own,
+/// among the user's windows, and the job and the packaged apps the session
+/// activated say which windows are the session's.
 pub struct Desktop {
-    handle: HDESK,
+    /// The private desktop; `None` on the screen.
+    handle: Option<HDESK>,
     original: HDESK,
     name: String,
     job: Job,
 }
 
 impl Desktop {
-    /// Make a private desktop and move this thread onto it, so that every
-    /// process it starts opens its windows there.
-    pub fn create() -> io::Result<Desktop> {
-        let session = SESSIONS.fetch_add(1, Ordering::Relaxed);
-        let name = format!("matinee-{}-{session}", std::process::id());
+    /// Make the session's place for apps: on the screen, the user's own
+    /// desktop as it is; otherwise a private desktop, with this thread
+    /// moved onto it so that every process it starts opens its windows
+    /// there.
+    pub fn create(screen: bool) -> io::Result<Desktop> {
         let job = Job::new()
             .map_err(|e| io::Error::new(e.kind(), format!("creating the session's job: {e}")))?;
-        let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
         let original = unsafe { GetThreadDesktop(GetCurrentThreadId()) };
+        if screen {
+            CURRENT.with(|c| {
+                *c.borrow_mut() = Some(Current {
+                    desktop: None,
+                    job: job.handle(),
+                    activated: Vec::new(),
+                })
+            });
+            return Ok(Desktop {
+                handle: None,
+                original,
+                name: "the screen".into(),
+                job,
+            });
+        }
+        let session = SESSIONS.fetch_add(1, Ordering::Relaxed);
+        let name = format!("matinee-{}-{session}", std::process::id());
+        let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
         // Hooks from other accounts are irrelevant; the flag keeps apps
         // that install their own hooks working.
         let handle = unsafe {
@@ -116,9 +205,15 @@ impl Desktop {
                 format!("entering the desktop: {e}"),
             ));
         }
-        CURRENT.with(|c| *c.borrow_mut() = Some((name.clone(), job.handle())));
+        CURRENT.with(|c| {
+            *c.borrow_mut() = Some(Current {
+                desktop: Some(name.clone()),
+                job: job.handle(),
+                activated: Vec::new(),
+            })
+        });
         Ok(Desktop {
-            handle,
+            handle: Some(handle),
             original,
             name,
             job,
@@ -126,7 +221,8 @@ impl Desktop {
     }
 }
 
-/// Every window on the desktop, top of the stack first.
+/// Every one of the session's windows on the desktop, top of the stack
+/// first (see [`is_session_window`]).
 fn all_windows_on(desktop: HDESK) -> Vec<HWND> {
     let mut list: Vec<HWND> = Vec::new();
     unsafe extern "system" fn collect(hwnd: HWND, lparam: isize) -> i32 {
@@ -135,6 +231,7 @@ fn all_windows_on(desktop: HDESK) -> Vec<HWND> {
         1
     }
     unsafe { EnumDesktopWindows(desktop, Some(collect), &mut list as *mut _ as isize) };
+    list.retain(|&h| is_session_window(h));
     list
 }
 
@@ -174,12 +271,8 @@ pub fn app_windows_here() -> Vec<HWND> {
     app_windows_on(unsafe { GetThreadDesktop(GetCurrentThreadId()) })
 }
 
-/// App windows on this thread's desktop, counting ones an app has created
-/// but not yet shown, so matinee can give them their place and reveal them.
-pub fn hidden_app_windows_here() -> Vec<HWND> {
-    hidden_app_windows_on(unsafe { GetThreadDesktop(GetCurrentThreadId()) })
-}
-
+/// App windows on `desktop`, counting hidden ones, for what an app left
+/// behind when its session ended.
 fn hidden_app_windows_on(desktop: HDESK) -> Vec<HWND> {
     all_windows_on(desktop)
         .into_iter()
@@ -197,25 +290,25 @@ fn hidden_app_windows_on(desktop: HDESK) -> Vec<HWND> {
         .collect()
 }
 
-/// Show `hwnd` without making it the active window, for a window an app
-/// created but left hidden on the private desktop.
-pub fn show(hwnd: HWND) {
-    unsafe { ShowWindow(hwnd, SW_SHOWNA) };
-}
-
 impl Drop for Desktop {
     /// End the session's apps, then name any window still open: a program
     /// Windows started on the app's behalf, outside the job, such as a
     /// packaged app. It keeps the desktop alive until it exits.
     fn drop(&mut self) {
-        CURRENT.with(|c| c.borrow_mut().take());
         self.job.kill();
+        // On the screen, the session's packaged apps are its children and
+        // end with it; anything else there is the user's.
+        let Some(handle) = self.handle else {
+            CURRENT.with(|c| c.borrow_mut().take());
+            return;
+        };
         let deadline = Instant::now() + Duration::from_secs(2);
-        let mut left = hidden_app_windows_on(self.handle);
+        let mut left = hidden_app_windows_on(handle);
         while !left.is_empty() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(50));
-            left = hidden_app_windows_on(self.handle);
+            left = hidden_app_windows_on(handle);
         }
+        CURRENT.with(|c| c.borrow_mut().take());
         if !left.is_empty() {
             let mut programs: Vec<String> =
                 left.iter().map(|&h| program_name(process_of(h))).collect();
@@ -230,7 +323,7 @@ impl Drop for Desktop {
         }
         unsafe {
             SetThreadDesktop(self.original);
-            CloseDesktop(self.handle);
+            CloseDesktop(handle);
         }
     }
 }

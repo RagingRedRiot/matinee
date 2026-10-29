@@ -40,6 +40,9 @@ options:
           display, and buses, but can read your files and use the network
   --fixed-too  with record, also write each GIF with the camera held on
           the whole screen, from the same run, named with -fixed added
+  --stills  with record, also write a PNG of the moment after each
+          highlight step, overlays and all, named with -01, -02, and on
+          added, for instructions and docs
   --view  with run or record, show the session in a window on your Wayland
           desktop as it runs, with the camera's view outlined and the
           pointer, but not captions, click ripples, or key badges; the run
@@ -57,6 +60,8 @@ static VIEW: AtomicBool = AtomicBool::new(false);
 static SCREEN: AtomicBool = AtomicBool::new(false);
 /// Set by `--fixed-too`: also write a fixed-camera GIF of each recording.
 static FIXED_TOO: AtomicBool = AtomicBool::new(false);
+/// Set by `--stills`: also write a PNG after each highlight step.
+static STILLS: AtomicBool = AtomicBool::new(false);
 static ARTIFACTS: OnceLock<PathBuf> = OnceLock::new();
 
 /// The boundary a command runs `story` in, isolated unless asked not to be.
@@ -86,7 +91,7 @@ fn main() -> ExitCode {
                 .find(|a| {
                     !matches!(
                         a.as_str(),
-                        "--no-isolation" | "--view" | "--fixed-too" | "--screen"
+                        "--no-isolation" | "--view" | "--fixed-too" | "--screen" | "--stills"
                     )
                 })
                 .map(String::as_str),
@@ -149,6 +154,15 @@ fn main() -> ExitCode {
                  moves the pointer and types while it runs; leave the mouse and keyboard alone"
             );
         }
+    }
+    let end = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    if let Some(at) = args[..end].iter().position(|a| a == "--stills") {
+        args.remove(at);
+        if args.first().is_none_or(|c| c != "record") {
+            eprintln!("matinee: --stills applies to record\n{USAGE}");
+            return ExitCode::from(2);
+        }
+        STILLS.store(true, Ordering::Relaxed);
     }
     let end = args.iter().position(|a| a == "--").unwrap_or(args.len());
     if let Some(at) = args[..end].iter().position(|a| a == "--fixed-too") {
@@ -792,6 +806,15 @@ fn record_story(path: &std::path::Path, story: &Story) -> bool {
                                 session.stop_recording().expect("recording was started");
                             let gif = boundary.work().join("out.gif");
                             let written = recording.write_gif(&gif, story.demo.fps)?;
+                            if STILLS.load(Ordering::Relaxed) {
+                                for (n, still) in
+                                    recording.stills(story.demo.fps).iter().enumerate()
+                                {
+                                    let png =
+                                        boundary.work().join(format!("still-{:02}.png", n + 1));
+                                    still.write_png(&png)?;
+                                }
+                            }
                             let fixed = match fixed {
                                 Some(fixed) => {
                                     let gif = boundary.work().join("out-fixed.gif");
@@ -828,17 +851,30 @@ fn record_story(path: &std::path::Path, story: &Story) -> bool {
             failed = true;
             break;
         }
-        let mut gifs = vec![("out.gif", "")];
+        let mut outputs = vec![("out.gif".to_string(), ".gif".to_string())];
         if FIXED_TOO.load(Ordering::Relaxed) {
-            gifs.push(("out-fixed.gif", "-fixed"));
+            outputs.push(("out-fixed.gif".into(), "-fixed.gif".into()));
+        }
+        // Stills, in order, each taken from the work folder once.
+        let mut stills: Vec<String> = std::fs::read_dir(&work)
+            .map(|dir| {
+                dir.filter_map(|e| e.ok()?.file_name().into_string().ok())
+                    .filter(|name| name.starts_with("still-") && name.ends_with(".png"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        stills.sort();
+        for name in &stills {
+            let suffix = name.trim_start_matches("still").to_string();
+            outputs.push((name.clone(), suffix));
         }
         let result = result.and_then(|code| match code {
             0 => Ok(()),
             _ => Err(std::io::Error::other("not recorded")),
         });
-        for (written, suffix) in gifs {
+        for (written, suffix) in &outputs {
             let target = story.dir.join(format!(
-                "{}-{}{suffix}.gif",
+                "{}-{}{suffix}",
                 story.demo.output.display(),
                 theme.name()
             ));
@@ -847,7 +883,16 @@ fn record_story(path: &std::path::Path, story: &Story) -> bool {
                     .parent()
                     .map(std::fs::create_dir_all)
                     .transpose()
-                    .and_then(|_| std::fs::copy(work.join(written), &target).map(drop)),
+                    .and_then(|_| std::fs::copy(work.join(written), &target).map(drop))
+                    .and_then(|_| {
+                        // A theme's stills must not be copied again as the
+                        // next theme's.
+                        if written.starts_with("still-") {
+                            std::fs::remove_file(work.join(written))
+                        } else {
+                            Ok(())
+                        }
+                    }),
                 Err(e) => Err(std::io::Error::new(e.kind(), e.to_string())),
             };
             match copied {

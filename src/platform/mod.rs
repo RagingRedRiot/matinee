@@ -18,6 +18,9 @@ mod windows;
 pub use windows::*;
 
 mod tree;
+
+/// A rectangle in device pixels on the desktop: x, y, width, height.
+pub type TextRect = (f64, f64, f64, f64);
 pub use tree::{Node, in_points};
 
 /// A top-level window on the display.

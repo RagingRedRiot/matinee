@@ -6,7 +6,7 @@
 //! compositor window by title.
 
 use super::bus::Buses;
-use crate::platform::Node;
+use crate::platform::{Node, TextRect};
 use std::{collections::HashSet, io, time::Duration};
 use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 
@@ -248,6 +248,13 @@ impl A11y {
                 path,
             })
             .collect()
+    }
+
+    /// Where the latest `text` in an app's text shows, and where the text
+    /// holding it shows. Not read on Linux yet: highlights there find text
+    /// in the terminal pane, and controls by name.
+    pub fn text_bounds(&self, _text: &str) -> Option<(TextRect, TextRect)> {
+        None
     }
 
     /// The app's windows and everything under them, in tree order. Nodes

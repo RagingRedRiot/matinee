@@ -62,6 +62,8 @@ Each step has one action. Durations use seconds or milliseconds, such as
 | Terminal command | `{ run = "my-app status", exit = 0 }`; checks the exit status |
 | Staged command | `{ terminal = "gh pr list", run = "cat fixtures/prs.txt" }`; displays the first command and runs the second |
 | Playback | `{ terminal = "gh auth status", output = "fixtures/auth.txt" }`; declared canned output, no command runs |
+| Highlight | `{ highlight = "Total", label = "The result", number = 1 }`; see [captions and highlights](#captions-and-highlights) |
+| Clear highlights | `{ clear = "highlights" }` |
 | Pause | `{ hold = "2s" }` |
 
 Names match exactly; a trailing `*` matches a prefix, and a `*` at both
@@ -83,6 +85,58 @@ then `type` and `key` steps with `in = "terminal"` in a mixed story. A later
 `{ wait_exit = "my-prompt" }` checks completion; otherwise status is checked
 at story end. Only one terminal command can remain running at a time.
 
+## Captions and highlights
+
+A scene's `caption` shows while the scene plays. `[captions]` sets where,
+and a scene's `caption_position` overrides it for that scene:
+
+| `position` | Where the caption goes |
+| --- | --- |
+| `"bottom"` | Over the frame, at its bottom; the default |
+| `"top"` | Over the frame, at its top |
+| `"auto"` | Over the frame, on the half away from the newest highlight, or else the pointer |
+| `"below"` | In a band added below the frame, where it covers nothing |
+| `"above"` | In a band added above the frame |
+
+```toml
+[captions]
+position = "below"
+
+[[scene]]
+caption = "The summary explains the result"
+caption_position = "top"
+steps = [ ... ]
+```
+
+A band makes the GIF taller by the band's height, for the whole recording,
+when any scene's caption goes in it.
+
+A `highlight` step marks part of the screen until the scene ends or a
+`{ clear = "highlights" }` step. It marks:
+
+- **text or a control, by name:** `{ highlight = "PASSED" }` marks the
+  latest text in the terminal pane, else in an app's text, such as a
+  Windows console window's (not read on Linux yet), else the control with
+  that name. `role`, `within`, `near`, `window`, and `in` narrow it to a
+  control, as for a click.
+- **a section of lines:** `{ highlight = { from = "== Summary", to = "Total" } }`
+  marks the lines from the latest holding `from` through the next holding
+  `to`, as wide as the terminal pane or the text holding them.
+- **a rectangle in a window:** `{ highlight_at = [x, y, width, height], window = "Main" }`,
+  in points; negative `x` and `y` count from the right and bottom.
+
+`style = "box"`, the default, outlines the mark; `"spotlight"` also dims the
+rest of the frame. `label` adds a callout beside the mark, or below or above
+it when the frame has no room beside. `number` adds a numbered marker, for a
+sequence of steps. The camera frames the mark, the step waits up to its
+`timeout` (5 seconds by default) for the mark to show, and the mark shows for
+a moment before the step's `hold` starts.
+
+`matinee record --stills` also writes a PNG at the end of each highlight
+step, after its hold, named `<output>-<theme>-01.png` and on, with the caption
+and highlights fully shown. Stills suit instructions and docs that walk
+through a screen one part at a time.
+
 ## Camera and output
 
 `[camera]` supports `mode = "auto"` or `"fixed"`, `max_zoom`, `ease`, and
@@ -92,8 +146,9 @@ for recordings meant for narrow screens, then review the resulting GIF size.
 
 Override framing with `{ camera = { focus = "Save", zoom = 1.8 } }`,
 `{ camera = { focus_at = [20, 40], zoom = 1.8 } }`, or `{ camera = "overview" }`.
-Coordinates can include a `window` selector. Captions, pointer ripples, and
-key badges are drawn at output resolution after camera cropping.
+Coordinates can include a `window` selector. Captions, highlights, pointer
+ripples, and key badges are drawn at output resolution after camera
+cropping.
 
 `[terminal]` supports `position = "bottom"` or `"right"`, `size`, and
 `font_size`. A story that launches no app gives the terminal the whole

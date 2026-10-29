@@ -12,6 +12,7 @@
 
 use super::wm;
 use crate::platform::Node;
+use crate::platform::TextRect;
 use windows::Win32::UI::Accessibility::{
     IUIAutomationInvokePattern, IUIAutomationSelectionItemPattern, IUIAutomationTogglePattern,
     UIA_InvokePatternId, UIA_SelectionItemPatternId, UIA_TogglePatternId,
@@ -149,6 +150,24 @@ impl A11y {
         false
     }
 
+    /// The latest `text` in an app's text, such as a console's buffer:
+    /// where it shows, and where the text holding it shows, each as x, y,
+    /// width, height in device pixels on the desktop.
+    pub fn text_bounds(&self, text: &str) -> Option<(TextRect, TextRect)> {
+        let walker = unsafe { self.automation.ControlViewWalker() }.ok()?;
+        for hwnd in wm::app_windows_here() {
+            let handle = windows::Win32::Foundation::HWND(hwnd);
+            let Ok(root) = (unsafe { self.automation.ElementFromHandle(handle) }) else {
+                continue;
+            };
+            let mut seen = 0;
+            if let Some(found) = find_text(&walker, &root, text, &mut seen) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
     /// Type `c` at the end of the field the last press focused. Whether
     /// there was one to type into.
     pub fn type_char(&self, c: char) -> bool {
@@ -201,6 +220,91 @@ impl A11y {
         }
         out
     }
+}
+
+/// The latest `text` in the text of `element` or a control-view
+/// descendant: where it shows, and where that text shows.
+fn find_text(
+    walker: &IUIAutomationTreeWalker,
+    element: &IUIAutomationElement,
+    text: &str,
+    seen: &mut usize,
+) -> Option<(TextRect, TextRect)> {
+    *seen += 1;
+    if *seen > MAX_NODES {
+        return None;
+    }
+    if let Ok(pattern) =
+        unsafe { element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) }
+    {
+        let found = unsafe {
+            pattern
+                .DocumentRange()
+                .and_then(|range| range.FindText(&windows::core::BSTR::from(text), true, false))
+        };
+        if let Ok(range) = found {
+            let shown = unsafe { range.GetBoundingRectangles() }
+                .ok()
+                .and_then(|array| unsafe { rects(array) });
+            let holder = unsafe { element.CurrentBoundingRectangle() }.ok();
+            if let (Some(shown), Some(r)) = (shown, holder) {
+                let holder = (
+                    r.left as f64,
+                    r.top as f64,
+                    (r.right - r.left) as f64,
+                    (r.bottom - r.top) as f64,
+                );
+                return Some((shown, holder));
+            }
+        }
+    }
+    let mut child = unsafe { walker.GetFirstChildElement(element) };
+    while let Ok(node) = child {
+        if let Some(found) = find_text(walker, &node, text, seen) {
+            return Some(found);
+        }
+        child = unsafe { walker.GetNextSiblingElement(&node) };
+    }
+    None
+}
+
+/// The rectangle around every rectangle in `array`, UI Automation's list of
+/// left, top, width, and height, which this frees. `None` when it is empty,
+/// as for text scrolled out of view.
+unsafe fn rects(array: *mut windows::Win32::System::Com::SAFEARRAY) -> Option<TextRect> {
+    use windows::Win32::System::Ole::{
+        SafeArrayAccessData, SafeArrayDestroy, SafeArrayGetUBound, SafeArrayUnaccessData,
+    };
+    if array.is_null() {
+        return None;
+    }
+    let mut out: Option<TextRect> = None;
+    unsafe {
+        if let Ok(upper) = SafeArrayGetUBound(array, 1) {
+            let mut data: *mut core::ffi::c_void = std::ptr::null_mut();
+            if SafeArrayAccessData(array, &mut data).is_ok() {
+                let values = std::slice::from_raw_parts(data as *const f64, (upper + 1) as usize);
+                for r in values.chunks_exact(4) {
+                    let (x, y, w, h) = (r[0], r[1], r[2], r[3]);
+                    if w <= 0.0 || h <= 0.0 {
+                        continue;
+                    }
+                    out = Some(match out {
+                        None => (x, y, w, h),
+                        Some((ox, oy, ow, oh)) => {
+                            let (x0, y0) = (ox.min(x), oy.min(y));
+                            let x1 = (ox + ow).max(x + w);
+                            let y1 = (oy + oh).max(y + h);
+                            (x0, y0, x1 - x0, y1 - y0)
+                        }
+                    });
+                }
+                let _ = SafeArrayUnaccessData(array);
+            }
+        }
+        let _ = SafeArrayDestroy(array);
+    }
+    out
 }
 
 /// Add `element` and every control-view descendant whose bounds hold

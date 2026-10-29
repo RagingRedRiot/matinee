@@ -96,6 +96,43 @@ impl Terminal {
     pub fn contents(&self) -> String {
         self.screen.lock().unwrap().screen().contents()
     }
+
+    /// The screen's text, one string per row.
+    fn rows(&self) -> Vec<String> {
+        let parser = self.screen.lock().unwrap();
+        let screen = parser.screen();
+        let (_, cols) = screen.size();
+        screen.rows(0, cols).collect()
+    }
+
+    /// Where the latest `text` on screen is: its row, its first column,
+    /// and how many columns it takes. Text broken across rows is not found.
+    pub fn find(&self, text: &str) -> Option<(u16, u16, u16)> {
+        rows_find(&self.rows(), text)
+    }
+
+    /// The rows from the latest one holding `from` through the first from
+    /// there on holding `to`.
+    pub fn find_lines(&self, from: &str, to: &str) -> Option<(u16, u16)> {
+        rows_span(&self.rows(), from, to)
+    }
+}
+
+/// Where the latest `text` in `rows` is: row, first column, and width.
+fn rows_find(rows: &[String], text: &str) -> Option<(u16, u16, u16)> {
+    rows.iter().enumerate().rev().find_map(|(r, line)| {
+        let at = line.rfind(text)?;
+        let col = line[..at].chars().count() as u16;
+        Some((r as u16, col, text.chars().count() as u16))
+    })
+}
+
+/// The rows from the latest holding `from` through the first from there on
+/// holding `to`.
+fn rows_span(rows: &[String], from: &str, to: &str) -> Option<(u16, u16)> {
+    let first = rows.iter().rposition(|line| line.contains(from))?;
+    let last = first + rows[first..].iter().position(|line| line.contains(to))?;
+    Some((first as u16, last as u16))
 }
 
 /// A rasterized glyph's character, weight (bold or not), and scale.
@@ -161,6 +198,19 @@ impl Pane {
             .horizontal_line_metrics(self.font_size)
             .expect("the embedded font has line metrics");
         (width, (line.new_line_size * 1.15).ceil())
+    }
+
+    /// The screen rectangle, in points, of `rows` rows of `cols` cells from
+    /// `row` and `col`.
+    pub fn cells(&self, row: u16, col: u16, rows: u16, cols: u16) -> crate::camera::Rect {
+        let (cw, lh) = self.cell();
+        let (x0, y0, _, _) = self.rect;
+        crate::camera::Rect::new(
+            (x0 + self.padding + col as f32 * cw) as f64,
+            (y0 + self.padding + row as f32 * lh) as f64,
+            (cols as f32 * cw) as f64,
+            (rows as f32 * lh) as f64,
+        )
     }
 
     /// Rows and columns that fit in the pane.
@@ -292,5 +342,36 @@ fn blend(frame: &mut Frame, x0: i64, y0: i64, w: usize, h: usize, alpha: &[u8], 
             };
             frame.pixels[at] = 0xff000000 | mix(16) | mix(8) | mix(0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{rows_find, rows_span};
+
+    fn rows(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|l| l.to_string()).collect()
+    }
+
+    #[test]
+    fn text_is_found_where_it_last_shows() {
+        let screen = rows(&[
+            "> make test",
+            "Result: PASSED",
+            "> make test",
+            "  Result: PASSED",
+        ]);
+        assert_eq!(rows_find(&screen, "PASSED"), Some((3, 10, 6)));
+        assert_eq!(rows_find(&screen, "missing"), None);
+        // Columns count characters, not bytes.
+        assert_eq!(rows_find(&rows(&["→ ok"]), "ok"), Some((0, 2, 2)));
+    }
+
+    #[test]
+    fn lines_run_from_the_latest_start_to_the_next_end() {
+        let screen = rows(&["== Run", "x", "end", "== Run", "y", "z", "end", "after"]);
+        assert_eq!(rows_span(&screen, "== Run", "end"), Some((3, 6)));
+        assert_eq!(rows_span(&screen, "== Run", "nowhere"), None);
+        assert_eq!(rows_span(&screen, "after", "end"), None);
     }
 }

@@ -91,7 +91,9 @@ wait_for = "Windows PowerShell"
 
 A console publishes its whole buffer as one text field, so match its
 output anywhere in it with a `*` at both ends, as in
-`{ wait_for = "*Done*", role = "document text" }`.
+`{ wait_for = "*Done*", role = "document text" }`. A plain `highlight` finds
+text in a console window, and in other apps' text, through UI Automation,
+so `{ highlight = "Done" }` marks just that word in the console.
 
 ## Not yet
 

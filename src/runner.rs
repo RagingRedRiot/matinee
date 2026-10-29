@@ -25,7 +25,7 @@ use crate::{
     keys,
     platform::{A11y, App, Button, Node, in_points},
     session::Session,
-    story::{Action, CameraMove, Step, Story, Target},
+    story::{Action, CameraMove, Mark, Spot, Step, Story, Target},
 };
 use std::{
     collections::HashSet,
@@ -43,6 +43,8 @@ const EXPECT_TIMEOUT: Duration = Duration::from_secs(3);
 const TRAVEL: Duration = Duration::from_millis(500);
 /// How long a click holds the button down.
 const CLICK: Duration = Duration::from_millis(80);
+/// How long a highlight shows before its step's hold, so it has faded in.
+const MARK_IN: Duration = Duration::from_millis(300);
 /// How long a drag takes from press to drop.
 const DRAG: Duration = Duration::from_millis(900);
 /// The pause on the drop target before letting go, so the app sees it.
@@ -93,6 +95,9 @@ struct Found {
 pub struct Runner<'r, 'b> {
     session: &'r mut Session<'b>,
     a11y: A11y,
+    /// Device pixels per point, for rectangles the platform reports in
+    /// pixels.
+    scale: f64,
     pointer: (f64, f64),
     /// A command left running in the terminal.
     running: Option<Running>,
@@ -114,6 +119,7 @@ impl<'r, 'b> Runner<'r, 'b> {
         Ok(Runner {
             session,
             a11y,
+            scale: story.demo.scale as f64,
             pointer: (w as f64 / 2.0, h as f64 / 2.0),
             running: None,
             step_at: (0, 0),
@@ -184,7 +190,8 @@ impl<'r, 'b> Runner<'r, 'b> {
                 None => format!("scene {}", si + 1),
             };
             self.session.mark_segment(&label);
-            self.session.caption(scene.caption.as_deref());
+            let position = story.caption_position(scene);
+            self.session.caption(scene.caption.as_deref(), position);
             for (ti, step) in scene.steps.iter().enumerate() {
                 self.step_at = (si + 1, ti + 1);
                 self.step(step).map_err(|message| Failure {
@@ -193,7 +200,8 @@ impl<'r, 'b> Runner<'r, 'b> {
                 })?;
                 done += 1;
             }
-            self.session.caption(None);
+            self.session.caption(None, position);
+            self.session.clear_highlights();
         }
         if self.running.is_some() {
             self.wait_exit(RUN_TIMEOUT).map_err(|message| Failure {
@@ -294,6 +302,19 @@ impl<'r, 'b> Runner<'r, 'b> {
                 self.session.run_for(PER_KEY).map_err(io)?;
             }
             Action::Pause => {}
+            Action::Highlight(highlight) => {
+                let timeout = step.timeout.unwrap_or(FIND_TIMEOUT);
+                let at = self.mark_rect(&highlight.mark, timeout)?;
+                self.frame(at, None).map_err(io)?;
+                self.session.highlight(
+                    at,
+                    highlight.style,
+                    highlight.label.as_deref(),
+                    highlight.number,
+                );
+                self.session.run_for(MARK_IN).map_err(io)?;
+            }
+            Action::ClearHighlights => self.session.clear_highlights(),
             Action::Camera(CameraMove::Overview) => {
                 let moved = self.session.camera.overview();
                 self.settle_camera(moved).map_err(io)?;
@@ -386,7 +407,109 @@ impl<'r, 'b> Runner<'r, 'b> {
         if let Some(hold) = step.hold {
             self.session.run_for(hold).map_err(io)?;
         }
+        if matches!(step.action, Action::Highlight(_)) {
+            self.session.mark_still();
+        }
         Ok(())
+    }
+
+    /// Where a highlight's mark is on the screen, in points, waiting up to
+    /// `timeout` for it to show.
+    fn mark_rect(&mut self, mark: &Mark, timeout: Duration) -> Result<CameraRect, String> {
+        match mark {
+            Mark::Area {
+                rect: [x, y, w, h],
+                window,
+            } => {
+                let spot = Spot {
+                    x: *x,
+                    y: *y,
+                    window: window.clone(),
+                };
+                let (px, py) = self.spot(&spot)?;
+                Ok(CameraRect::new(px, py, *w, *h))
+            }
+            Mark::Target(target)
+                if target.role.is_none()
+                    && target.within.is_none()
+                    && target.near.is_none()
+                    && target.window.is_none()
+                    && target.app.is_none() =>
+            {
+                // Text in the terminal or an app's text, or else a control
+                // with that name.
+                let found = self.poll(timeout, |r| {
+                    r.text_rect(&target.name)
+                        .or_else(|| r.find(target, false).ok().map(|f| rect(f.rect)))
+                })?;
+                found.ok_or_else(|| {
+                    format!(
+                        "nothing showing matches \"{}\": no text in the terminal or an app, \
+                         and no control with that name",
+                        target.name
+                    )
+                })
+            }
+            Mark::Target(target) => {
+                let found = self.wait_until(target, timeout, false)?;
+                Ok(rect(found.rect))
+            }
+            Mark::Lines { from, to } => {
+                let found = self.poll(timeout, |r| r.lines_rect(from, to))?;
+                found.ok_or_else(|| {
+                    format!(
+                        "no lines run from one holding \"{from}\" to one holding \"{to}\" \
+                         in the terminal or an app's text"
+                    )
+                })
+            }
+        }
+    }
+
+    /// Where the latest `text` shows: in the terminal pane, or in an app's
+    /// text.
+    fn text_rect(&self, text: &str) -> Option<CameraRect> {
+        self.session.terminal_text(text).or_else(|| {
+            let ((x, y, w, h), _) = self.a11y.text_bounds(text)?;
+            Some(self.in_points(x, y, w, h))
+        })
+    }
+
+    /// Where the lines from the latest holding `from` through one holding
+    /// `to` show, as wide as the terminal pane or the text holding them.
+    fn lines_rect(&self, from: &str, to: &str) -> Option<CameraRect> {
+        self.session.terminal_lines(from, to).or_else(|| {
+            let ((_, top, _, _), (hx, _, hw, _)) = self.a11y.text_bounds(from)?;
+            let ((_, ty, _, th), _) = self.a11y.text_bounds(to)?;
+            (ty >= top).then(|| self.in_points(hx, top, hw, ty + th - top))
+        })
+    }
+
+    /// A rectangle in device pixels on the screen, in points.
+    fn in_points(&self, x: f64, y: f64, w: f64, h: f64) -> CameraRect {
+        let s = self.scale;
+        CameraRect::new(x / s, y / s, w / s, h / s)
+    }
+
+    /// `found` once it gives something, letting the apps draw between
+    /// tries, or `None` after `timeout`.
+    fn poll<T>(
+        &mut self,
+        timeout: Duration,
+        found: impl Fn(&Self) -> Option<T>,
+    ) -> Result<Option<T>, String> {
+        let start = Instant::now();
+        loop {
+            if let Some(value) = found(self) {
+                return Ok(Some(value));
+            }
+            if start.elapsed() >= timeout {
+                return Ok(None);
+            }
+            for _ in 0..3 {
+                self.session.tick().map_err(|e| e.to_string())?;
+            }
+        }
     }
 
     /// Where a window-relative point is on the output. The window is the

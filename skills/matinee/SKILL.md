@@ -25,6 +25,8 @@ drive matinee from the CLI.
 Options: `--artifacts <folder>` (run, record) saves a PNG at each passing
 `expect` or `wait_for` and `failure.png` when a run fails. `--fixed-too`
 (record) also writes `<output>-<theme>-fixed.gif` with the camera held still.
+`--stills` (record) also writes `<output>-<theme>-01.png` and on, one after
+each highlight step, for instructions and docs.
 `--view` (run, record) opens a live window on the user's Wayland desktop; it is
 for a person watching, so don't use it in an unattended session.
 
@@ -98,8 +100,12 @@ wait_for = "="                  # an accessible name that shows the app is ready
 # size = 200                    # points, along the pane's direction
 # font_size = 15
 
+[captions]                      # optional
+# position = "bottom"           # "top", "auto", or a band: "below", "above"
+
 [[scene]]
-caption = "Add two numbers"     # optional, shown over the scene
+caption = "Add two numbers"     # optional, shown during the scene
+# caption_position = "top"      # this scene's, in place of [captions]
 steps = [
   { click = "7" },
   { click = "+" },
@@ -129,6 +135,8 @@ after the step), and `timeout`.
 | Staged command | `{ terminal = "gh pr list", run = "cat fixtures/prs.txt" }` |
 | Canned output | `{ terminal = "gh auth status", output = "fixtures/auth.txt" }` |
 | Camera | `{ camera = { focus = "Theme", zoom = 1.8 } }`, `{ camera = { focus_at = [20, 40] } }`, `{ camera = "overview" }` |
+| Highlight | `{ highlight = "Total", label = "The result", number = 1 }`, `{ highlight = { from = "== Summary", to = "Total" }, style = "spotlight" }`, `{ highlight_at = [20, 40, 200, 30], window = "Main" }` |
+| Clear highlights | `{ clear = "highlights" }` |
 | Pause | `{ hold = "2s" }` |
 
 **Targets.** Names match the accessible name exactly; a trailing `*` matches a
@@ -151,6 +159,13 @@ qualify any assertion that must prove a GUI result.
 **Coordinates** are a fallback for apps with no usable accessibility tree,
 when `probe` shows nothing to name. They are logical points within the window;
 negative values count from the right or bottom. Name the window.
+
+**Highlights** mark part of the screen until the scene ends or highlights
+are cleared. A plain name marks the latest such text in the terminal pane,
+then in an app's text (Windows console windows; not on Linux yet), then a
+control with that name; selectors narrow it to a control. `style` is `box` or
+`spotlight`; `label` adds a callout and `number` a numbered marker. Highlight
+what a reader should look at, in the order they should read it.
 
 **Terminal stories.** `run` checks the exit status (0 unless `exit` says
 otherwise). `terminal` shows one command while `run` runs another, for

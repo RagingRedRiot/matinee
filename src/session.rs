@@ -9,7 +9,7 @@ use crate::{
     frame::Frame,
     platform::{A11y, Boundary, Button, Child, Display, Window},
     record::Recording,
-    story::{CameraMode, PanePosition, Story, Theme},
+    story::{CameraMode, CaptionPosition, HighlightStyle, PanePosition, Story, Theme},
     terminal::{Pane, Terminal},
 };
 use std::{
@@ -42,6 +42,10 @@ pub struct Session<'a> {
     oversized: Vec<String>,
     /// How far recordings' lossy compression may move a color.
     lossy: u8,
+    /// The theme being recorded, and whether captions need a band above
+    /// the frame and below it.
+    theme: Theme,
+    bands: (bool, bool),
     artifacts: bool,
     /// What recordings show of the screen.
     pub camera: Camera,
@@ -95,6 +99,8 @@ impl<'a> Session<'a> {
             pointer_shown: false,
             oversized: vec![],
             lossy: story.demo.lossy,
+            theme,
+            bands: story.caption_bands(),
             artifacts: false,
             camera: Camera::new(
                 w as f64,
@@ -409,10 +415,15 @@ impl<'a> Session<'a> {
     /// recording.
     pub fn start_recording(&mut self, fixed_too: bool) {
         let (size, scale, pane, lossy) = (self.size, self.scale, self.pane_rect(), self.lossy);
+        let (theme, (above, below)) = (self.theme, self.bands);
         let new = || {
-            let mut recording = Recording::new(size[0] as usize, size[1] as usize, scale as usize);
+            let (w, h) = (size[0] as usize, size[1] as usize);
+            let mut recording = Recording::new(w, h, scale as usize, theme);
             recording.set_pane(pane);
             recording.set_lossy(lossy);
+            if above || below {
+                recording.set_bands(above, below, theme);
+            }
             recording
         };
         self.recording = Some(new());
@@ -429,9 +440,51 @@ impl<'a> Session<'a> {
         self.recordings().for_each(|r| r.segment(label));
     }
 
-    /// Caption what is recorded from now on, or stop with `None`.
-    pub fn caption(&mut self, text: Option<&str>) {
-        self.recordings().for_each(|r| r.caption(text));
+    /// Caption what is recorded from now on at `position`, or stop with
+    /// `None`.
+    pub fn caption(&mut self, text: Option<&str>, position: CaptionPosition) {
+        self.recordings().for_each(|r| r.caption(text, position));
+    }
+
+    /// Mark `rect` on the screen, in points, in what is recorded from now
+    /// on.
+    pub fn highlight(
+        &mut self,
+        rect: Rect,
+        style: HighlightStyle,
+        label: Option<&str>,
+        number: Option<u32>,
+    ) {
+        self.recordings()
+            .for_each(|r| r.highlight(rect, style, label, number));
+    }
+
+    /// Take down every highlight in what is recorded from now on.
+    pub fn clear_highlights(&mut self) {
+        self.recordings().for_each(|r| r.clear_highlights());
+    }
+
+    /// Keep what was just recorded as a still picture.
+    pub fn mark_still(&mut self) {
+        self.recordings().for_each(|r| r.still());
+    }
+
+    /// Where the latest `text` in the terminal pane is on the screen, in
+    /// points.
+    pub fn terminal_text(&self, text: &str) -> Option<Rect> {
+        let (terminal, pane) = self.terminal.as_ref()?;
+        let (row, col, len) = terminal.find(text)?;
+        Some(pane.cells(row, col, 1, len))
+    }
+
+    /// Where the lines of the terminal pane from the latest holding `from`
+    /// through the next holding `to` are on the screen, in points, as wide
+    /// as the pane.
+    pub fn terminal_lines(&self, from: &str, to: &str) -> Option<Rect> {
+        let (terminal, pane) = self.terminal.as_ref()?;
+        let (first, last) = terminal.find_lines(from, to)?;
+        let (_, cols) = pane.grid();
+        Some(pane.cells(first, 0, last - first + 1, cols))
     }
 
     /// Mark a click in the recording, where the pointer is.

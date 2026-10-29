@@ -106,6 +106,13 @@ at `scale = 2` shows them at three quarters of their size. matinee warns
 when they differ. At `scale = 2` the story's screen is twice its size in
 pixels, and with `--screen` it must fit on the display.
 
+## Watching a run
+
+`--view` on `run` or `record` opens a window on your desktop that shows the
+session as it runs, with the camera's view outlined, as on Linux. Apps on
+the private desktop stay there; the window shows copies of their frames.
+It opens without taking focus, and closing it leaves the run going.
+
 ## Not yet
 
 matinee does not drive the Windows theme yet, so light and dark recordings

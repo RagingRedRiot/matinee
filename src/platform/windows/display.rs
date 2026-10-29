@@ -31,7 +31,7 @@ use windows_sys::Win32::{
 static SCALE_WARNING: Once = Once::new();
 
 /// The primary display's scaling, in percent, as Windows applies it now.
-fn display_scale() -> Option<u32> {
+pub(super) fn display_scale() -> Option<u32> {
     let (mut x, mut y) = (0u32, 0u32);
     let monitor = unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) };
     let ok = unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut x, &mut y) } >= 0;

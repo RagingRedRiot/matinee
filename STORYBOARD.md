@@ -178,7 +178,7 @@ They show the full session at capture resolution and are grouped by story,
 theme, and invocation so older failures cannot masquerade as new results.
 
 To watch a story as it runs, add `--view` to `run` or `record`. A window on
-your Wayland desktop shows the whole session, with the camera's view outlined
+your desktop, Wayland or Windows, shows the whole session, with the camera's view outlined
 and the rest dimmed, so you can see where the camera goes and when. The
 pointer shows once a step has used it, as in recordings. Captions, click
 ripples, and key badges do not: recordings draw them when the GIF is

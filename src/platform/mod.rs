@@ -6,7 +6,8 @@
 //!
 //! Each platform provides the same names with the same shapes, selected at
 //! compile time, the way the standard library does. Linux has the full
-//! pipeline; Windows runs terminal stories so far.
+//! pipeline; Windows runs terminal and GUI stories, with the gaps
+//! `docs/windows.md` lists.
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -18,6 +19,7 @@ mod windows;
 pub use windows::*;
 
 mod tree;
+mod view;
 
 /// A rectangle in device pixels on the desktop: x, y, width, height.
 pub type TextRect = (f64, f64, f64, f64);

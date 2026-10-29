@@ -43,7 +43,7 @@ options:
   --stills  with record, also write a PNG of the moment after each
           highlight step, overlays and all, named with -01, -02, and on
           added, for instructions and docs
-  --view  with run or record, show the session in a window on your Wayland
+  --view  with run or record, show the session in a window on your
           desktop as it runs, with the camera's view outlined and the
           pointer, but not captions, click ripples, or key badges; the run
           never waits for the window

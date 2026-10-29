@@ -29,9 +29,9 @@ Options: `--artifacts <folder>` (run, record) saves a PNG at each passing
 (record) also writes `<output>-<theme>-fixed.gif` with the camera held still.
 `--stills` (record) also writes `<output>-<theme>-01.png` and on, one after
 each highlight step, for instructions and docs.
-`--view` (run, record) opens a live window on the user's Wayland desktop; it is
-for a person watching, so don't use it in an unattended session. It is not on
-Windows yet. `--screen` (Windows: run, record, snapshot, probe) runs the
+`--view` (run, record) opens a live window on the user's desktop, Wayland or
+Windows; it is for a person watching, so don't use it in an unattended
+session. `--screen` (Windows: run, record, snapshot, probe) runs the
 story's apps on the user's own screen; see [Windows](#windows).
 
 Exit status: 0 success, 1 a failed story or error (the message says which
@@ -249,7 +249,7 @@ runs only when the user is logged on.
 - **Browsers** started with a fresh profile on a machine signed in to a work
   or Microsoft account may sign in and show the account over the page; start
   them private, as with Edge's `--inprivate`.
-- **Not yet on Windows:** `--view`, driving the system theme (light and dark
+- **Not yet on Windows:** driving the system theme (light and dark
   look alike), and isolation: the session is a fresh profile, and commands
   can read the user's files and use the network whatever `network` says.
 

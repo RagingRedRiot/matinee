@@ -52,8 +52,10 @@ jobs:
           #   .github/, scripts/   the workflows, this one included, and the
           #                        review script CI runs
           #   build files          what gets compiled, and with which toolchain
-          #   src/boundary.rs      the isolation boundary that keeps the host's
-          #                        files and identity out of recordings
+          #   the boundary         the isolation that keeps the host's files and
+          #                        identity out of recordings: src/boundary.rs,
+          #                        and src/platform/linux/boundary.rs once the
+          #                        platform code moves under src/platform
           #   tests/               append-only: a new test or fixture needs no
           #                        review, but changing, deleting, or renaming
           #                        one can weaken what CI proves
@@ -62,7 +64,7 @@ jobs:
           CONTROL_PREFIXES = ('.github/', '.cargo/', 'scripts/')
           APPEND_ONLY_PREFIXES = ('tests/',)
           BUILD_NAMES = {'Cargo.toml', 'Cargo.lock', 'build.rs', 'rust-toolchain', 'rust-toolchain.toml'}
-          GUARDED_FILES = {'src/boundary.rs'}
+          GUARDED_FILES = {'src/boundary.rs', 'src/platform/linux/boundary.rs'}
 
           def protected(path, status):
               """`status` is GitHub's: 'added', 'modified', 'removed', 'renamed', ..."""

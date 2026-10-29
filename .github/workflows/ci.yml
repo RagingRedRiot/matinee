@@ -107,12 +107,56 @@ jobs:
           sudo apt-get install -y libpixman-1-dev libxkbcommon-dev libwayland-dev
       - name: Check the advertised minimum Rust version
         run: cargo check --locked --all-targets
+      # Checking needs no Windows linker, so the Windows build's minimum Rust
+      # is checked here too, until there is a Windows platform to check.
+      - name: Check it for Windows too
+        run: |
+          if [ ! -d src/platform/windows ]; then
+            echo "No Windows platform in this tree yet; nothing to check."
+            exit 0
+          fi
+          rustup target add x86_64-pc-windows-gnu
+          cargo check --locked --all-targets --target x86_64-pc-windows-gnu
+
+  # Lint and test the Windows build, on the oldest supported Windows runner.
+  # A tree without a Windows platform has nothing to build there yet, and
+  # says so.
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The commit, not the branch, so a later push cannot swap the code.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Is there a Windows platform to build?
+        id: platform
+        shell: bash
+        run: |
+          if [ -d src/platform/windows ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No Windows platform in this tree yet; nothing to build."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-12
+        if: steps.platform.outputs.present == 'true'
+        with:
+          toolchain: stable
+          components: clippy
+      - name: Lint
+        if: steps.platform.outputs.present == 'true'
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Tests
+        if: steps.platform.outputs.present == 'true'
+        run: cargo test --locked
 
   # One stable name for branch protection to require. `if: always()` makes a
   # skipped or cancelled job a failure here rather than a silent pass.
   complete:
     name: ci complete
-    needs: [linux, minimum-rust]
+    needs: [linux, minimum-rust, windows]
     if: always()
     runs-on: ubuntu-24.04
     steps:

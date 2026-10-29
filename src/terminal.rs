@@ -2,51 +2,34 @@
 //! emulator and drawn into each frame with an embedded font, so it looks
 //! the same on every machine.
 //!
-//! One bash runs for the whole story, so `cd` and exported variables carry
-//! from one step to the next. It does not read the terminal: matinee sends
-//! it each command over a private pipe, and bash reports each exit status
-//! over another. The command itself runs with the terminal as its input and
-//! output, so programs behave as they would for a person, and its output is
-//! exactly what appears. matinee draws the prompt and types the command
-//! line, which is how a staged step can show one command while running
-//! another.
+//! One shell runs for the whole story (see [`Shell`]), so `cd` and exported
+//! variables carry from one step to the next. matinee draws the prompt and
+//! types the command line, which is how a staged step can show one command
+//! while running another.
 
-use crate::{boundary::Boundary, compositor::Frame, story::Theme};
+use crate::{
+    frame::Frame,
+    platform::{Boundary, PROMPT_CHAR, Shell},
+    story::Theme,
+};
 use std::{
     collections::HashMap,
-    io::{self, BufRead, Read, Write},
-    os::{
-        fd::{AsRawFd, FromRawFd, OwnedFd},
-        unix::process::CommandExt,
-    },
-    process::{Child, Stdio},
-    sync::{
-        Arc, Mutex,
-        mpsc::{self, Receiver},
-    },
+    io,
+    sync::{Arc, Mutex},
 };
 
 const REGULAR: &[u8] = include_bytes!("../assets/fonts/DejaVuSansMono.ttf");
 pub(crate) const BOLD: &[u8] = include_bytes!("../assets/fonts/DejaVuSansMono-Bold.ttf");
 
-/// The prompt matinee draws before each command: a bold cyan `$`.
-const PROMPT: &str = "\x1b[1;36m$\x1b[0m ";
-
-/// The loop bash runs: read a NUL-terminated command from fd 3, run it on
-/// the terminal, and write its status to fd 4. Ctrl+C stops the command,
-/// not the loop.
-const LOOP: &str = r#"trap : INT
-while IFS= read -r -d '' __matinee_cmd <&3; do
-  eval "$__matinee_cmd" </dev/tty 3<&- 4>&-
-  printf '%d\n' "$?" >&4
-done"#;
+/// The prompt matinee draws before each command: the platform's prompt
+/// character in bold cyan.
+fn prompt() -> String {
+    format!("\x1b[1;36m{}\x1b[0m ", PROMPT_CHAR)
+}
 
 pub struct Terminal {
     screen: Arc<Mutex<vt100::Parser>>,
-    master: std::fs::File,
-    commands: std::fs::File,
-    statuses: Receiver<i32>,
-    child: Child,
+    shell: Shell,
 }
 
 impl Terminal {
@@ -56,73 +39,12 @@ impl Terminal {
         boundary: &Boundary,
         rows: u16,
         cols: u16,
-        env: &[(&str, &str)],
+        env: &[(String, String)],
     ) -> io::Result<Terminal> {
-        let (master, slave) = open_pty(rows, cols)?;
-        let (command_read, command_write) = pipe()?;
-        let (status_read, status_write) = pipe()?;
-        let (command_fd, status_fd) = (command_read.as_raw_fd(), status_write.as_raw_fd());
-
-        let mut cmd = boundary.command("bash");
-        cmd.args(["--noprofile", "--norc", "-c", LOOP])
-            .envs(env.iter().copied())
-            .env("TERM", "xterm-256color")
-            .stdin(Stdio::from(slave.try_clone()?))
-            .stdout(Stdio::from(slave.try_clone()?))
-            .stderr(Stdio::from(slave));
-        unsafe {
-            cmd.pre_exec(move || {
-                // Its own session, with the terminal as the controlling
-                // terminal, so /dev/tty and Ctrl+C work.
-                if libc::setsid() < 0
-                    || libc::ioctl(0, libc::TIOCSCTTY, 0) < 0
-                    || libc::dup2(command_fd, 3) < 0
-                    || libc::dup2(status_fd, 4) < 0
-                {
-                    return Err(io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-        let child = cmd
-            .spawn()
-            .map_err(|e| io::Error::new(e.kind(), format!("bash: {e}")))?;
-        drop((command_read, status_write));
-
         let screen = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
-        let sink = screen.clone();
-        let mut reader = std::fs::File::from(master.try_clone()?);
-        std::thread::spawn(move || {
-            let mut buf = [0u8; 8192];
-            // Ends with an error once every writer has gone.
-            while let Ok(n) = reader.read(&mut buf) {
-                if n == 0 {
-                    break;
-                }
-                sink.lock().unwrap().process(&buf[..n]);
-            }
-        });
-        let (status_tx, statuses) = mpsc::channel();
-        let status_reader = io::BufReader::new(std::fs::File::from(status_read));
-        std::thread::spawn(move || {
-            for line in status_reader.lines() {
-                let Ok(line) = line else { break };
-                if let Ok(status) = line.trim().parse() {
-                    if status_tx.send(status).is_err() {
-                        break;
-                    }
-                }
-            }
-        });
-
-        let terminal = Terminal {
-            screen,
-            master: std::fs::File::from(master),
-            commands: std::fs::File::from(command_write),
-            statuses,
-            child,
-        };
-        terminal.show(PROMPT);
+        let shell = Shell::start(boundary, rows, cols, env, screen.clone())?;
+        let terminal = Terminal { screen, shell };
+        terminal.show(&prompt());
         Ok(terminal)
     }
 
@@ -133,25 +55,12 @@ impl Terminal {
 
     /// Start a command. Its status arrives through [`Terminal::finished`].
     pub fn run(&mut self, command: &str) -> io::Result<()> {
-        let mut bytes = command.as_bytes().to_vec();
-        bytes.push(0);
-        self.commands.write_all(&bytes)
+        self.shell.run(command)
     }
 
     /// The exit status of the last command, once it has finished.
     pub fn finished(&mut self) -> io::Result<Option<i32>> {
-        match self.statuses.try_recv() {
-            Ok(status) => Ok(Some(status)),
-            Err(mpsc::TryRecvError::Empty) => match self.child.try_wait()? {
-                Some(status) => Err(io::Error::other(format!(
-                    "the terminal's shell exited ({status})"
-                ))),
-                None => Ok(None),
-            },
-            Err(mpsc::TryRecvError::Disconnected) => {
-                Err(io::Error::other("the terminal's shell stopped"))
-            }
-        }
+        self.shell.finished()
     }
 
     /// After a command: start a fresh line if needed, then show the prompt.
@@ -160,12 +69,12 @@ impl Terminal {
         if column != 0 {
             self.show("\r\n");
         }
-        self.show(PROMPT);
+        self.show(&prompt());
     }
 
     /// Send keys to whatever is running in the terminal.
     pub fn send(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.master.write_all(bytes)
+        self.shell.send(bytes)
     }
 
     /// Whether the running program has asked for application cursor keys.
@@ -187,48 +96,43 @@ impl Terminal {
     pub fn contents(&self) -> String {
         self.screen.lock().unwrap().screen().contents()
     }
+
+    /// The screen's text, one string per row.
+    fn rows(&self) -> Vec<String> {
+        let parser = self.screen.lock().unwrap();
+        let screen = parser.screen();
+        let (_, cols) = screen.size();
+        screen.rows(0, cols).collect()
+    }
+
+    /// Where the latest `text` on screen is: its row, its first column,
+    /// and how many columns it takes. Text broken across rows is not found.
+    pub fn find(&self, text: &str) -> Option<(u16, u16, u16)> {
+        rows_find(&self.rows(), text)
+    }
+
+    /// The rows from the latest one holding `from` through the first from
+    /// there on holding `to`.
+    pub fn find_lines(&self, from: &str, to: &str) -> Option<(u16, u16)> {
+        rows_span(&self.rows(), from, to)
+    }
 }
 
-impl Drop for Terminal {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
+/// Where the latest `text` in `rows` is: row, first column, and width.
+fn rows_find(rows: &[String], text: &str) -> Option<(u16, u16, u16)> {
+    rows.iter().enumerate().rev().find_map(|(r, line)| {
+        let at = line.rfind(text)?;
+        let col = line[..at].chars().count() as u16;
+        Some((r as u16, col, text.chars().count() as u16))
+    })
 }
 
-fn open_pty(rows: u16, cols: u16) -> io::Result<(OwnedFd, OwnedFd)> {
-    let (mut master, mut slave) = (-1, -1);
-    let size = libc::winsize {
-        ws_row: rows,
-        ws_col: cols,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
-    let ret = unsafe {
-        libc::openpty(
-            &mut master,
-            &mut slave,
-            std::ptr::null_mut(),
-            std::ptr::null(),
-            &size,
-        )
-    };
-    if ret < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
-    for fd in [&master, &slave] {
-        unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
-    }
-    Ok((master, slave))
-}
-
-fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
-    let mut fds = [0; 2];
-    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
+/// The rows from the latest holding `from` through the first from there on
+/// holding `to`.
+fn rows_span(rows: &[String], from: &str, to: &str) -> Option<(u16, u16)> {
+    let first = rows.iter().rposition(|line| line.contains(from))?;
+    let last = first + rows[first..].iter().position(|line| line.contains(to))?;
+    Some((first as u16, last as u16))
 }
 
 /// A rasterized glyph's character, weight (bold or not), and scale.
@@ -294,6 +198,19 @@ impl Pane {
             .horizontal_line_metrics(self.font_size)
             .expect("the embedded font has line metrics");
         (width, (line.new_line_size * 1.15).ceil())
+    }
+
+    /// The screen rectangle, in points, of `rows` rows of `cols` cells from
+    /// `row` and `col`.
+    pub fn cells(&self, row: u16, col: u16, rows: u16, cols: u16) -> crate::camera::Rect {
+        let (cw, lh) = self.cell();
+        let (x0, y0, _, _) = self.rect;
+        crate::camera::Rect::new(
+            (x0 + self.padding + col as f32 * cw) as f64,
+            (y0 + self.padding + row as f32 * lh) as f64,
+            (cols as f32 * cw) as f64,
+            (rows as f32 * lh) as f64,
+        )
     }
 
     /// Rows and columns that fit in the pane.
@@ -425,5 +342,36 @@ fn blend(frame: &mut Frame, x0: i64, y0: i64, w: usize, h: usize, alpha: &[u8], 
             };
             frame.pixels[at] = 0xff000000 | mix(16) | mix(8) | mix(0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{rows_find, rows_span};
+
+    fn rows(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|l| l.to_string()).collect()
+    }
+
+    #[test]
+    fn text_is_found_where_it_last_shows() {
+        let screen = rows(&[
+            "> make test",
+            "Result: PASSED",
+            "> make test",
+            "  Result: PASSED",
+        ]);
+        assert_eq!(rows_find(&screen, "PASSED"), Some((3, 10, 6)));
+        assert_eq!(rows_find(&screen, "missing"), None);
+        // Columns count characters, not bytes.
+        assert_eq!(rows_find(&rows(&["→ ok"]), "ok"), Some((0, 2, 2)));
+    }
+
+    #[test]
+    fn lines_run_from_the_latest_start_to_the_next_end() {
+        let screen = rows(&["== Run", "x", "end", "== Run", "y", "z", "end", "after"]);
+        assert_eq!(rows_span(&screen, "== Run", "end"), Some((3, 6)));
+        assert_eq!(rows_span(&screen, "== Run", "nowhere"), None);
+        assert_eq!(rows_span(&screen, "after", "end"), None);
     }
 }

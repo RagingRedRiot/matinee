@@ -43,7 +43,7 @@
   stops, and `--artifacts` saves the screen it stopped on.
 - **A camera that follows the action.** It eases in on whatever is clicked,
   typed, or dragged, so small controls read clearly at README width, with
-  captions, click ripples, and key badges.
+  captions, highlights, click ripples, and key badges.
 - **Light and dark.** Recordings come in both themes by default, ready for a
   `<picture>` element like the one above.
 - **Terminals, GUIs, and both at once.** GTK and libadwaita apps, terminal
@@ -150,6 +150,7 @@ matinee shell demo.toml                # a shell inside the isolated session the
 --view               # run, record: watch the session and camera in a window
 --artifacts <dir>    # run, record: save a still at each check, and the failed screen
 --fixed-too          # record: also write a fixed-camera GIF per theme
+--stills             # record: also write a PNG after each highlight step
 --no-isolation       # run on the host where user namespaces are unavailable
 ```
 

@@ -21,12 +21,11 @@
 //! send it keys, and checks its status at `wait_exit` or the story's end.
 
 use crate::{
-    a11y::{A11y, App, Node},
     camera::Rect as CameraRect,
-    compositor::BUTTON_LEFT,
     keys,
+    platform::{A11y, App, Button, Node, in_points},
     session::Session,
-    story::{Action, CameraMove, Step, Story, Target},
+    story::{Action, CameraMove, Mark, Spot, Step, Story, Target},
 };
 use std::{
     collections::HashSet,
@@ -44,6 +43,8 @@ const EXPECT_TIMEOUT: Duration = Duration::from_secs(3);
 const TRAVEL: Duration = Duration::from_millis(500);
 /// How long a click holds the button down.
 const CLICK: Duration = Duration::from_millis(80);
+/// How long a highlight shows before its step's hold, so it has faded in.
+const MARK_IN: Duration = Duration::from_millis(300);
 /// How long a drag takes from press to drop.
 const DRAG: Duration = Duration::from_millis(900);
 /// The pause on the drop target before letting go, so the app sees it.
@@ -94,6 +95,9 @@ struct Found {
 pub struct Runner<'r, 'b> {
     session: &'r mut Session<'b>,
     a11y: A11y,
+    /// Device pixels per point, for rectangles the platform reports in
+    /// pixels.
+    scale: f64,
     pointer: (f64, f64),
     /// A command left running in the terminal.
     running: Option<Running>,
@@ -110,11 +114,12 @@ struct Running {
 
 impl<'r, 'b> Runner<'r, 'b> {
     pub fn new(session: &'r mut Session<'b>, story: &Story) -> io::Result<Runner<'r, 'b>> {
-        let a11y = A11y::connect(&session.buses)?;
+        let a11y = session.accessibility()?;
         let [w, h] = story.demo.size;
         Ok(Runner {
             session,
             a11y,
+            scale: story.demo.scale as f64,
             pointer: (w as f64 / 2.0, h as f64 / 2.0),
             running: None,
             step_at: (0, 0),
@@ -147,7 +152,7 @@ impl<'r, 'b> Runner<'r, 'b> {
                 }
                 None => {
                     let start = Instant::now();
-                    while self.session.compositor.windows().is_empty() {
+                    while self.session.windows().is_empty() {
                         if start.elapsed() > timeout {
                             return Err(Failure {
                                 at,
@@ -162,7 +167,7 @@ impl<'r, 'b> Runner<'r, 'b> {
         // Windows first draw at their own size and are then resized to
         // their place; steps start once every window has settled there.
         let start = Instant::now();
-        while !self.session.compositor.windows().iter().all(|w| w.placed) {
+        while !self.session.windows().iter().all(|w| w.placed) {
             if start.elapsed() > LAUNCH_TIMEOUT {
                 return Err(Failure {
                     at: "launch".into(),
@@ -185,7 +190,8 @@ impl<'r, 'b> Runner<'r, 'b> {
                 None => format!("scene {}", si + 1),
             };
             self.session.mark_segment(&label);
-            self.session.caption(scene.caption.as_deref());
+            let position = story.caption_position(scene);
+            self.session.caption(scene.caption.as_deref(), position);
             for (ti, step) in scene.steps.iter().enumerate() {
                 self.step_at = (si + 1, ti + 1);
                 self.step(step).map_err(|message| Failure {
@@ -194,7 +200,8 @@ impl<'r, 'b> Runner<'r, 'b> {
                 })?;
                 done += 1;
             }
-            self.session.caption(None);
+            self.session.caption(None, position);
+            self.session.clear_highlights();
         }
         if self.running.is_some() {
             self.wait_exit(RUN_TIMEOUT).map_err(|message| Failure {
@@ -295,6 +302,20 @@ impl<'r, 'b> Runner<'r, 'b> {
                 self.session.run_for(PER_KEY).map_err(io)?;
             }
             Action::Pause => {}
+            Action::Highlight(highlight) => {
+                let timeout = step.timeout.unwrap_or(FIND_TIMEOUT);
+                let at = self.mark_rect(&highlight.mark, timeout)?;
+                self.frame(at, None).map_err(io)?;
+                self.session.highlight(
+                    at,
+                    highlight.style,
+                    highlight.label.as_deref(),
+                    highlight.number,
+                    highlight.color,
+                );
+                self.session.run_for(MARK_IN).map_err(io)?;
+            }
+            Action::ClearHighlights => self.session.clear_highlights(),
             Action::Camera(CameraMove::Overview) => {
                 let moved = self.session.camera.overview();
                 self.settle_camera(moved).map_err(io)?;
@@ -387,13 +408,115 @@ impl<'r, 'b> Runner<'r, 'b> {
         if let Some(hold) = step.hold {
             self.session.run_for(hold).map_err(io)?;
         }
+        if matches!(step.action, Action::Highlight(_)) {
+            self.session.mark_still();
+        }
         Ok(())
+    }
+
+    /// Where a highlight's mark is on the screen, in points, waiting up to
+    /// `timeout` for it to show.
+    fn mark_rect(&mut self, mark: &Mark, timeout: Duration) -> Result<CameraRect, String> {
+        match mark {
+            Mark::Area {
+                rect: [x, y, w, h],
+                window,
+            } => {
+                let spot = Spot {
+                    x: *x,
+                    y: *y,
+                    window: window.clone(),
+                };
+                let (px, py) = self.spot(&spot)?;
+                Ok(CameraRect::new(px, py, *w, *h))
+            }
+            Mark::Target(target)
+                if target.role.is_none()
+                    && target.within.is_none()
+                    && target.near.is_none()
+                    && target.window.is_none()
+                    && target.app.is_none() =>
+            {
+                // Text in the terminal or an app's text, or else a control
+                // with that name.
+                let found = self.poll(timeout, |r| {
+                    r.text_rect(&target.name)
+                        .or_else(|| r.find(target, false).ok().map(|f| rect(f.rect)))
+                })?;
+                found.ok_or_else(|| {
+                    format!(
+                        "nothing showing matches \"{}\": no text in the terminal or an app, \
+                         and no control with that name",
+                        target.name
+                    )
+                })
+            }
+            Mark::Target(target) => {
+                let found = self.wait_until(target, timeout, false)?;
+                Ok(rect(found.rect))
+            }
+            Mark::Lines { from, to } => {
+                let found = self.poll(timeout, |r| r.lines_rect(from, to))?;
+                found.ok_or_else(|| {
+                    format!(
+                        "no lines run from one holding \"{from}\" to one holding \"{to}\" \
+                         in the terminal or an app's text"
+                    )
+                })
+            }
+        }
+    }
+
+    /// Where the latest `text` shows: in the terminal pane, or in an app's
+    /// text.
+    fn text_rect(&self, text: &str) -> Option<CameraRect> {
+        self.session.terminal_text(text).or_else(|| {
+            let ((x, y, w, h), _) = self.a11y.text_bounds(text)?;
+            Some(self.in_points(x, y, w, h))
+        })
+    }
+
+    /// Where the lines from the latest holding `from` through one holding
+    /// `to` show, as wide as the terminal pane or the text holding them.
+    fn lines_rect(&self, from: &str, to: &str) -> Option<CameraRect> {
+        self.session.terminal_lines(from, to).or_else(|| {
+            let ((_, top, _, _), (hx, _, hw, _)) = self.a11y.text_bounds(from)?;
+            let ((_, ty, _, th), _) = self.a11y.text_bounds(to)?;
+            (ty >= top).then(|| self.in_points(hx, top, hw, ty + th - top))
+        })
+    }
+
+    /// A rectangle in device pixels on the screen, in points.
+    fn in_points(&self, x: f64, y: f64, w: f64, h: f64) -> CameraRect {
+        let s = self.scale;
+        CameraRect::new(x / s, y / s, w / s, h / s)
+    }
+
+    /// `found` once it gives something, letting the apps draw between
+    /// tries, or `None` after `timeout`.
+    fn poll<T>(
+        &mut self,
+        timeout: Duration,
+        found: impl Fn(&Self) -> Option<T>,
+    ) -> Result<Option<T>, String> {
+        let start = Instant::now();
+        loop {
+            if let Some(value) = found(self) {
+                return Ok(Some(value));
+            }
+            if start.elapsed() >= timeout {
+                return Ok(None);
+            }
+            for _ in 0..3 {
+                self.session.tick().map_err(|e| e.to_string())?;
+            }
+        }
     }
 
     /// Where a window-relative point is on the output. The window is the
     /// one with the spot's exact title, or the only one open.
     fn spot(&self, spot: &crate::story::Spot) -> Result<(f64, f64), String> {
-        let windows = self.session.compositor.windows();
+        let windows = self.session.windows();
         let titles = || {
             windows
                 .iter()
@@ -418,7 +541,7 @@ impl<'r, 'b> Runner<'r, 'b> {
                 }
             },
         };
-        let (w, h) = (window.rect.size.w as f64, window.rect.size.h as f64);
+        let (w, h) = (window.width as f64, window.height as f64);
         let x = if spot.x < 0.0 { w + spot.x } else { spot.x };
         let y = if spot.y < 0.0 { h + spot.y } else { spot.y };
         if !(0.0..w).contains(&x) || !(0.0..h).contains(&y) {
@@ -427,7 +550,7 @@ impl<'r, 'b> Runner<'r, 'b> {
                 spot.x, spot.y, window.title
             ));
         }
-        Ok((window.rect.loc.x as f64 + x, window.rect.loc.y as f64 + y))
+        Ok((window.x as f64 + x, window.y as f64 + y))
     }
 
     fn terminal(&mut self) -> Result<&mut crate::terminal::Terminal, String> {
@@ -510,7 +633,7 @@ impl<'r, 'b> Runner<'r, 'b> {
 
     /// Keys go to the focused window; fail clearly when there is none.
     fn need_window(&self, step: &str) -> Result<(), String> {
-        if self.session.compositor.windows().is_empty() {
+        if self.session.windows().is_empty() {
             return Err(format!(
                 "a `{step}` step needs an app window to type into; terminal commands are `run` steps"
             ));
@@ -546,8 +669,7 @@ impl<'r, 'b> Runner<'r, 'b> {
                 from.0 + (point.0 - from.0) * e,
                 from.1 + (point.1 - from.1) * e,
             );
-            let now = self.session.now();
-            self.session.compositor.pointer_move(at.0, at.1, now);
+            self.session.pointer_move(at.0, at.1);
             self.pointer = at;
             if t >= 1.0 {
                 return Ok(());
@@ -558,46 +680,32 @@ impl<'r, 'b> Runner<'r, 'b> {
 
     /// Press where the pointer is, carry it to `point`, and let go there.
     fn drag(&mut self, point: (f64, f64)) -> io::Result<()> {
-        let now = self.session.now();
-        self.session
-            .compositor
-            .pointer_button(BUTTON_LEFT, true, now);
+        self.session.pointer_button(Button::Left, true);
         self.session.run_for(CLICK)?;
         self.move_to(point, DRAG)?;
         self.session.run_for(DROP_HOVER)?;
-        let now = self.session.now();
-        self.session
-            .compositor
-            .pointer_button(BUTTON_LEFT, false, now);
+        self.session.pointer_button(Button::Left, false);
         self.session.tick()?;
         Ok(())
     }
 
     fn click(&mut self) -> io::Result<()> {
         self.session.mark_click();
-        let now = self.session.now();
-        self.session
-            .compositor
-            .pointer_button(BUTTON_LEFT, true, now);
+        self.session.pointer_button(Button::Left, true);
         self.session.run_for(CLICK)?;
-        let now = self.session.now();
-        self.session
-            .compositor
-            .pointer_button(BUTTON_LEFT, false, now);
+        self.session.pointer_button(Button::Left, false);
         self.session.tick()?;
         Ok(())
     }
 
     fn press(&mut self, press: &keys::Press) -> io::Result<()> {
-        let now = self.session.now();
-        let keyboard = &mut self.session.compositor;
         for &m in &press.modifiers {
-            keyboard.key(m, true, now);
+            self.session.key(m, true);
         }
-        keyboard.key(press.key, true, now);
-        keyboard.key(press.key, false, now);
+        self.session.key(press.key, true);
+        self.session.key(press.key, false);
         for &m in press.modifiers.iter().rev() {
-            keyboard.key(m, false, now);
+            self.session.key(m, false);
         }
         Ok(())
     }
@@ -765,7 +873,7 @@ impl<'r, 'b> Runner<'r, 'b> {
     /// Where `node` is on the output, if it is inside its window.
     fn on_screen(&self, nodes: &[Node], i: usize, target: &Target) -> Result<Found, String> {
         let node = &nodes[i];
-        let windows = self.session.compositor.windows();
+        let windows = self.session.windows();
         let window = windows
             .iter()
             .find(|w| w.title == node.window)
@@ -779,34 +887,30 @@ impl<'r, 'b> Runner<'r, 'b> {
                     titles.join(", ")
                 )
             })?;
-        let (x, y, w, h) = crate::a11y::in_points(
+        let (x, y, w, h) = in_points(
             nodes,
             i,
-            (window.rect.size.w, window.rect.size.h),
+            (window.width, window.height),
             self.session.scale() as i32,
         )
         .ok_or_else(|| format!("\"{}\" does not report its position", target.name))?;
         let (cx, cy) = (x as f64 + w as f64 / 2.0, y as f64 + h as f64 / 2.0);
-        let size = window.rect.size;
-        if cx < 0.0 || cy < 0.0 || cx >= size.w as f64 || cy >= size.h as f64 {
+        if cx < 0.0 || cy < 0.0 || cx >= window.width as f64 || cy >= window.height as f64 {
             return Err(format!(
                 "\"{}\" is outside its window ({x},{y} {w}x{h} in a {}x{} window); scroll it into view first",
-                target.name, size.w, size.h
+                target.name, window.width, window.height
             ));
         }
-        let point = (window.rect.loc.x as f64 + cx, window.rect.loc.y as f64 + cy);
-        let (ax, ay, aw, ah) = self.session.compositor.window_area();
+        let point = (window.x as f64 + cx, window.y as f64 + cy);
+        let (ax, ay, aw, ah) = self.session.window_area();
         let inside = |v: f64, start: i32, len: i32| v >= start as f64 && v < (start + len) as f64;
         if !inside(point.0, ax, aw) || !inside(point.1, ay, ah) {
             return Err(format!(
                 "\"{}\" is behind the terminal pane: the window is {}x{} but the space beside the pane is {aw}x{ah}; make the pane smaller or the screen larger",
-                target.name, size.w, size.h
+                target.name, window.width, window.height
             ));
         }
-        let (left, top) = (
-            window.rect.loc.x as f64 + x as f64,
-            window.rect.loc.y as f64 + y as f64,
-        );
+        let (left, top) = (window.x as f64 + x as f64, window.y as f64 + y as f64);
         Ok(Found {
             point,
             rect: (left, top, w as f64, h as f64),
@@ -815,12 +919,16 @@ impl<'r, 'b> Runner<'r, 'b> {
     }
 }
 
-/// Whether `name`, as a storyboard writes it, matches `actual`: exactly,
-/// or, when it ends in `*`, as a prefix, for labels that change as an app
-/// runs (`j1 release*` matches `j1 release, running, Now`).
+/// Whether `name`, as a storyboard writes it, matches `actual`: exactly;
+/// when it ends in `*`, as a prefix, for labels that change as an app runs
+/// (`j1 release*` matches `j1 release, running, Now`); and when it also
+/// starts with `*`, anywhere, for a console's whole buffer in one field.
 fn names(name: &str, actual: &str) -> bool {
     match name.strip_suffix('*') {
-        Some(prefix) => actual.starts_with(prefix),
+        Some(rest) => match rest.strip_prefix('*') {
+            Some(inner) => actual.contains(inner),
+            None => actual.starts_with(rest),
+        },
         None => actual == name,
     }
 }
@@ -869,15 +977,7 @@ fn descends_from(mut pid: u32, root: u32) -> bool {
         if pid == root {
             return true;
         }
-        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
-            return false;
-        };
-        // The parent is the second field after the parenthesized name.
-        let Some(parent) = stat
-            .rsplit_once(')')
-            .and_then(|(_, rest)| rest.split_whitespace().nth(1))
-            .and_then(|p| p.parse().ok())
-        else {
+        let Some(parent) = crate::platform::parent_of(pid) else {
             return false;
         };
         if parent == 0 || parent == pid {
@@ -982,6 +1082,11 @@ mod tests {
         assert!(!names("j1 release*", "j2 release"));
         assert!(names("Drop here", "Drop here"));
         assert!(!names("Drop", "Drop here"));
+        assert!(names("*3 passed*", "> make test\r\n3 passed, 0 failed\r\n"));
+        assert!(!names(
+            "*3 passed*",
+            "> make test\r\n0 passed, 3 failed\r\n"
+        ));
     }
 
     #[test]
@@ -994,6 +1099,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn a_long_list_of_names_points_at_probe() {
         let app = App {
             bus: ":1.1".into(),
@@ -1035,6 +1141,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_process_descends_from_itself_and_its_parent() {
         let me = std::process::id();
         let parent = std::os::unix::process::parent_id();

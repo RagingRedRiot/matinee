@@ -14,6 +14,10 @@
 
 mod x11;
 
+use crate::{
+    frame::Frame,
+    platform::{Button, Window as WindowInfo},
+};
 use smithay::{
     backend::renderer::{
         Bind,
@@ -86,57 +90,12 @@ use std::{io, os::fd::AsRawFd, path::Path, sync::Arc, time::Duration};
 use x11::Focus;
 
 /// Linux input event codes for pointer buttons.
-pub const BUTTON_LEFT: u32 = 0x110;
-pub const BUTTON_RIGHT: u32 = 0x111;
-pub const BUTTON_MIDDLE: u32 = 0x112;
+const BUTTON_LEFT: u32 = 0x110;
+const BUTTON_RIGHT: u32 = 0x111;
+const BUTTON_MIDDLE: u32 = 0x112;
 
 /// The desktop background behind windows, as RGBA.
 const BACKGROUND: [f32; 4] = [0.5, 0.55, 0.55, 1.0];
-
-/// One rendered frame of the whole output, in output pixels.
-pub struct Frame {
-    pub width: usize,
-    pub height: usize,
-    /// Rows of 0xAARRGGBB pixels.
-    pub pixels: Vec<u32>,
-}
-
-impl Frame {
-    pub fn pixel(&self, x: usize, y: usize) -> u32 {
-        self.pixels[y * self.width + x]
-    }
-
-    /// Save the frame as an opaque PNG.
-    pub fn write_png(&self, path: &std::path::Path) -> io::Result<()> {
-        let file = io::BufWriter::new(std::fs::File::create(path)?);
-        let mut encoder = png::Encoder::new(file, self.width as u32, self.height as u32);
-        encoder.set_color(png::ColorType::Rgb);
-        encoder.set_depth(png::BitDepth::Eight);
-        let rgb: Vec<u8> = self
-            .pixels
-            .iter()
-            .flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8])
-            .collect();
-        encoder
-            .write_header()
-            .and_then(|mut w| w.write_image_data(&rgb))
-            .map_err(io::Error::other)
-    }
-}
-
-/// A mapped toplevel window.
-#[derive(Debug, Clone, PartialEq)]
-pub struct WindowInfo {
-    pub title: String,
-    pub app_id: String,
-    /// The window's position and size in logical points.
-    pub rect: Rectangle<i32, Logical>,
-    /// Whether it has keyboard focus.
-    pub focused: bool,
-    /// Whether it has been given its place: sized to the window area, or,
-    /// for a dialog, centered at its own size.
-    pub placed: bool,
-}
 
 pub struct Compositor {
     display: Display<State>,
@@ -496,10 +455,14 @@ impl Compositor {
                     ))
                 })?;
                 let loc = self.state.space.element_location(window)?;
+                let size = window.geometry().size;
                 Some(WindowInfo {
                     title,
                     app_id,
-                    rect: Rectangle::new(loc, window.geometry().size),
+                    x: loc.x,
+                    y: loc.y,
+                    width: size.w,
+                    height: size.h,
                     focused: focus.as_ref() == Some(&Focus::Surface(toplevel.wl_surface().clone())),
                     // The app has also acknowledged the size it was given.
                     placed: (window.user_data().get::<Sized>().is_some()
@@ -527,7 +490,10 @@ impl Compositor {
         Some(WindowInfo {
             title: x11.title(),
             app_id: x11.class(),
-            rect: Rectangle::new(loc, rect.size),
+            x: loc.x,
+            y: loc.y,
+            width: rect.size.w,
+            height: rect.size.h,
             focused: focus == Some(&Focus::X11(x11.clone())),
             // Sized windows are placed once X has the area's size.
             placed: (window.user_data().get::<Sized>().is_some()
@@ -562,9 +528,14 @@ impl Compositor {
         pointer.frame(&mut self.state);
     }
 
-    /// Press or release a pointer button, such as [`BUTTON_LEFT`]. Pressing
-    /// focuses and raises the window under the pointer.
-    pub fn pointer_button(&mut self, button: u32, pressed: bool, time: Duration) {
+    /// Press or release a pointer button. Pressing focuses and raises the
+    /// window under the pointer.
+    pub fn pointer_button(&mut self, button: Button, pressed: bool, time: Duration) {
+        let button = match button {
+            Button::Left => BUTTON_LEFT,
+            Button::Right => BUTTON_RIGHT,
+            Button::Middle => BUTTON_MIDDLE,
+        };
         let serial = SERIAL_COUNTER.next_serial();
         let pointer = self.state.pointer();
         if pressed && !pointer.is_grabbed() {

@@ -1,6 +1,8 @@
+#![cfg(target_os = "linux")]
+
 //! The built-in compositor, driven by a small Wayland client in a thread.
 
-use matinee::compositor::{BUTTON_LEFT, Compositor, WindowInfo};
+use matinee::platform::{Button, Window, compositor::Compositor};
 use std::{
     os::{fd::AsFd, unix::net::UnixStream},
     path::PathBuf,
@@ -415,7 +417,7 @@ impl Harness {
         }
     }
 
-    fn windows(&self) -> Vec<WindowInfo> {
+    fn windows(&self) -> Vec<Window> {
         self.compositor.windows()
     }
 
@@ -441,7 +443,7 @@ fn mapped(titles: &'static [&'static str]) -> impl FnMut(&mut Compositor) -> boo
         let windows = c.windows();
         titles
             .iter()
-            .all(|t| windows.iter().any(|w| w.title == *t && w.rect.size.w > 0))
+            .all(|t| windows.iter().any(|w| w.title == *t && w.width > 0))
     }
 }
 
@@ -461,12 +463,15 @@ fn a_window_fills_the_output_and_renders() {
     h.until("the window at full size", |c| {
         c.windows()
             .iter()
-            .any(|w| w.rect.size == (SIZE.0 as i32, SIZE.1 as i32).into())
+            .any(|w| (w.width, w.height) == (SIZE.0 as i32, SIZE.1 as i32))
     });
     h.compositor.dispatch(Duration::from_millis(50)).unwrap();
     let window = &h.windows()[0];
-    assert_eq!(window.rect.loc, (0, 0).into());
-    assert_eq!(window.rect.size, (SIZE.0 as i32, SIZE.1 as i32).into());
+    assert_eq!((window.x, window.y), (0, 0));
+    assert_eq!(
+        (window.width, window.height),
+        (SIZE.0 as i32, SIZE.1 as i32)
+    );
     assert!(window.focused);
 
     let frame = h.compositor.render(Duration::from_millis(1234)).unwrap();
@@ -523,14 +528,14 @@ fn a_dialog_is_centered_at_its_own_size_and_takes_focus() {
     h.until("the dialog centered", |c| {
         c.windows()
             .iter()
-            .any(|w| w.title == "Dialog" && w.rect.loc == (100, 100).into())
+            .any(|w| w.title == "Dialog" && (w.x, w.y) == (100, 100))
     });
     let dialog = h
         .windows()
         .into_iter()
         .find(|w| w.title == "Dialog")
         .unwrap();
-    assert_eq!(dialog.rect.size, (200, 100).into());
+    assert_eq!((dialog.width, dialog.height), (200, 100));
     assert!(dialog.focused);
 
     let frame = h.compositor.render(Duration::ZERO).unwrap();
@@ -542,9 +547,9 @@ fn a_dialog_is_centered_at_its_own_size_and_takes_focus() {
     h.drain();
     h.compositor.pointer_move(20.0, 20.0, Duration::ZERO);
     h.compositor
-        .pointer_button(BUTTON_LEFT, true, Duration::ZERO);
+        .pointer_button(Button::Left, true, Duration::ZERO);
     h.compositor
-        .pointer_button(BUTTON_LEFT, false, Duration::ZERO);
+        .pointer_button(Button::Left, false, Duration::ZERO);
     h.until("main focused", |c| {
         c.windows().iter().any(|w| w.title == "Main" && w.focused)
     });
@@ -573,7 +578,9 @@ fn window_area_leaves_room_for_a_terminal() {
     );
     h.compositor.set_window_area(0, 0, 400, 200);
     h.until("the window at the area's size", |c| {
-        c.windows().iter().any(|w| w.rect.size == (400, 200).into())
+        c.windows()
+            .iter()
+            .any(|w| (w.width, w.height) == (400, 200))
     });
     // The client redraws at the new size after the configure.
     let start = Instant::now();
@@ -604,12 +611,12 @@ fn a_drag_icon_sits_at_its_hotspot() {
     h.until("the window at full size", |c| {
         c.windows()
             .iter()
-            .any(|w| w.rect.size == (SIZE.0 as i32, SIZE.1 as i32).into())
+            .any(|w| (w.width, w.height) == (SIZE.0 as i32, SIZE.1 as i32))
     });
     h.compositor.dispatch(Duration::from_millis(50)).unwrap();
     h.compositor.pointer_move(100.0, 100.0, Duration::ZERO);
     h.compositor
-        .pointer_button(BUTTON_LEFT, true, Duration::ZERO);
+        .pointer_button(Button::Left, true, Duration::ZERO);
     // The icon's top-left corner is 12 points left of and 8 above the
     // pointer, so it covers 88..108 by 92..112, in device pixels twice that.
     let start = Instant::now();

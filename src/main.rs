@@ -1,4 +1,4 @@
-use matinee::{a11y::A11y, boundary::Boundary, runner::Runner, session::Session, story::Story};
+use matinee::{platform::Boundary, runner::Runner, session::Session, story::Story};
 use std::hash::{Hash, Hasher};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,27 +40,40 @@ options:
           display, and buses, but can read your files and use the network
   --fixed-too  with record, also write each GIF with the camera held on
           the whole screen, from the same run, named with -fixed added
-  --view  with run or record, show the session in a window on your Wayland
+  --stills  with record, also write a PNG of the moment after each
+          highlight step, overlays and all, named with -01, -02, and on
+          added, for instructions and docs
+  --view  with run or record, show the session in a window on your
           desktop as it runs, with the camera's view outlined and the
           pointer, but not captions, click ripples, or key badges; the run
-          never waits for the window";
+          never waits for the window
+  --screen  on Windows, with run, record, snapshot, or probe, open apps on
+          your own screen instead of a private desktop, for packaged (Store)
+          apps and apps that need the screen to draw, such as WPF ones;
+          matinee takes the pointer and keyboard while it runs";
 
 /// Set by `--no-isolation`: run stories on the host, without namespaces.
 static NO_ISOLATION: AtomicBool = AtomicBool::new(false);
 /// Set by `--view`: show the session in a window while it runs.
 static VIEW: AtomicBool = AtomicBool::new(false);
+/// Set by `--screen`: open apps on the user's screen, not a private desktop.
+static SCREEN: AtomicBool = AtomicBool::new(false);
 /// Set by `--fixed-too`: also write a fixed-camera GIF of each recording.
 static FIXED_TOO: AtomicBool = AtomicBool::new(false);
+/// Set by `--stills`: also write a PNG after each highlight step.
+static STILLS: AtomicBool = AtomicBool::new(false);
 static ARTIFACTS: OnceLock<PathBuf> = OnceLock::new();
 
 /// The boundary a command runs `story` in, isolated unless asked not to be.
 fn boundary_for(story: &Story, work: &std::path::Path) -> std::io::Result<Boundary> {
-    let boundary = Boundary::for_story(story, work)?;
+    let mut boundary = Boundary::for_story(story, work)?;
     if NO_ISOLATION.load(Ordering::Relaxed) {
-        boundary.without_isolation()
-    } else {
-        Ok(boundary)
+        boundary = boundary.without_isolation()?;
     }
+    if SCREEN.load(Ordering::Relaxed) {
+        boundary = boundary.on_screen()?;
+    }
+    Ok(boundary)
 }
 
 fn main() -> ExitCode {
@@ -75,7 +88,12 @@ fn main() -> ExitCode {
         args.drain(at..at + 2);
         if !matches!(
             args.iter()
-                .find(|a| !matches!(a.as_str(), "--no-isolation" | "--view" | "--fixed-too"))
+                .find(|a| {
+                    !matches!(
+                        a.as_str(),
+                        "--no-isolation" | "--view" | "--fixed-too" | "--screen" | "--stills"
+                    )
+                })
                 .map(String::as_str),
             Some("run" | "record")
         ) {
@@ -118,6 +136,33 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
         VIEW.store(true, Ordering::Relaxed);
+    }
+    let end = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    if let Some(at) = args[..end].iter().position(|a| a == "--screen") {
+        args.remove(at);
+        if !matches!(
+            args.first().map(String::as_str),
+            Some("run" | "record" | "snapshot" | "probe")
+        ) {
+            eprintln!("matinee: --screen applies to run, record, snapshot, and probe\n{USAGE}");
+            return ExitCode::from(2);
+        }
+        SCREEN.store(true, Ordering::Relaxed);
+        if cfg!(windows) {
+            eprintln!(
+                "matinee: running on your screen: apps open on your own desktop, and matinee \
+                 moves the pointer and types while it runs; leave the mouse and keyboard alone"
+            );
+        }
+    }
+    let end = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    if let Some(at) = args[..end].iter().position(|a| a == "--stills") {
+        args.remove(at);
+        if args.first().is_none_or(|c| c != "record") {
+            eprintln!("matinee: --stills applies to record\n{USAGE}");
+            return ExitCode::from(2);
+        }
+        STILLS.store(true, Ordering::Relaxed);
     }
     let end = args.iter().position(|a| a == "--").unwrap_or(args.len());
     if let Some(at) = args[..end].iter().position(|a| a == "--fixed-too") {
@@ -165,7 +210,7 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     };
-    matinee::viewport::close();
+    matinee::platform::viewport::close();
     code
 }
 
@@ -184,7 +229,7 @@ fn open_viewport(stories: &[Story]) -> std::io::Result<()> {
         .max()
         .unwrap_or(0);
     let [w, h] = stories[0].demo.size;
-    matinee::viewport::open(pixels, (w, h))
+    matinee::platform::viewport::open(pixels, (w, h))
 }
 
 /// Assertion and failure images are written inside the same session as the
@@ -283,7 +328,7 @@ fn shell(path: &str, command: &[String]) -> ExitCode {
         session.run(|| {
             let (program, args) = match command.split_first() {
                 Some((program, args)) => (program.as_str(), args),
-                None => ("bash", &[][..]),
+                None => (matinee::platform::SHELL, &[][..]),
             };
             match session.command(program).args(args).status() {
                 Ok(status) => status.code().unwrap_or(1),
@@ -438,21 +483,20 @@ fn probe(path: &str, all: bool, command: &[String]) -> ExitCode {
 }
 
 fn print_tree(session: &Session, all: bool) -> std::io::Result<()> {
-    let windows = session.compositor.windows();
+    let windows = session.windows();
     for window in &windows {
-        let r = window.rect;
         println!(
             "window \"{}\" ({}) at {},{} {}x{}{}",
             window.title,
             window.app_id,
-            r.loc.x,
-            r.loc.y,
-            r.size.w,
-            r.size.h,
+            window.x,
+            window.y,
+            window.width,
+            window.height,
             if window.focused { ", focused" } else { "" }
         );
     }
-    let a11y = A11y::connect(&session.buses)?;
+    let a11y = session.accessibility()?;
     let apps = a11y.apps();
     if apps.is_empty() {
         println!("\nno app published an accessibility tree");
@@ -485,8 +529,8 @@ fn print_tree(session: &Session, all: bool) -> std::io::Result<()> {
                 .iter()
                 .find(|w| w.title == node.window)
                 .or_else(|| (windows.len() == 1).then(|| &windows[0]))
-                .map_or((0, 0), |w| (w.rect.size.w, w.rect.size.h));
-            let at = matinee::a11y::in_points(&nodes, i, size, session.scale() as i32)
+                .map_or((0, 0), |w| (w.width, w.height));
+            let at = matinee::platform::in_points(&nodes, i, size, session.scale() as i32)
                 .map(|(x, y, w, h)| format!(" at {x},{y} {w}x{h}"))
                 .unwrap_or_default();
             let text = node
@@ -762,6 +806,15 @@ fn record_story(path: &std::path::Path, story: &Story) -> bool {
                                 session.stop_recording().expect("recording was started");
                             let gif = boundary.work().join("out.gif");
                             let written = recording.write_gif(&gif, story.demo.fps)?;
+                            if STILLS.load(Ordering::Relaxed) {
+                                for (n, still) in
+                                    recording.stills(story.demo.fps).iter().enumerate()
+                                {
+                                    let png =
+                                        boundary.work().join(format!("still-{:02}.png", n + 1));
+                                    still.write_png(&png)?;
+                                }
+                            }
                             let fixed = match fixed {
                                 Some(fixed) => {
                                     let gif = boundary.work().join("out-fixed.gif");
@@ -798,17 +851,30 @@ fn record_story(path: &std::path::Path, story: &Story) -> bool {
             failed = true;
             break;
         }
-        let mut gifs = vec![("out.gif", "")];
+        let mut outputs = vec![("out.gif".to_string(), ".gif".to_string())];
         if FIXED_TOO.load(Ordering::Relaxed) {
-            gifs.push(("out-fixed.gif", "-fixed"));
+            outputs.push(("out-fixed.gif".into(), "-fixed.gif".into()));
+        }
+        // Stills, in order, each taken from the work folder once.
+        let mut stills: Vec<String> = std::fs::read_dir(&work)
+            .map(|dir| {
+                dir.filter_map(|e| e.ok()?.file_name().into_string().ok())
+                    .filter(|name| name.starts_with("still-") && name.ends_with(".png"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        stills.sort();
+        for name in &stills {
+            let suffix = name.trim_start_matches("still").to_string();
+            outputs.push((name.clone(), suffix));
         }
         let result = result.and_then(|code| match code {
             0 => Ok(()),
             _ => Err(std::io::Error::other("not recorded")),
         });
-        for (written, suffix) in gifs {
+        for (written, suffix) in &outputs {
             let target = story.dir.join(format!(
-                "{}-{}{suffix}.gif",
+                "{}-{}{suffix}",
                 story.demo.output.display(),
                 theme.name()
             ));
@@ -817,7 +883,16 @@ fn record_story(path: &std::path::Path, story: &Story) -> bool {
                     .parent()
                     .map(std::fs::create_dir_all)
                     .transpose()
-                    .and_then(|_| std::fs::copy(work.join(written), &target).map(drop)),
+                    .and_then(|_| std::fs::copy(work.join(written), &target).map(drop))
+                    .and_then(|_| {
+                        // A theme's stills must not be copied again as the
+                        // next theme's.
+                        if written.starts_with("still-") {
+                            std::fs::remove_file(work.join(written))
+                        } else {
+                            Ok(())
+                        }
+                    }),
                 Err(e) => Err(std::io::Error::new(e.kind(), e.to_string())),
             };
             match copied {

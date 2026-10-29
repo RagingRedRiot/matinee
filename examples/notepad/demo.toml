@@ -1,0 +1,22 @@
+# A GUI demo on Windows: matinee drives classic Notepad on its own private
+# desktop, typing a note and checking the text it put there. Notepad
+# publishes a UI Automation tree, so the text is read by meaning, not pixels.
+
+[demo]
+output = "notepad"
+size = [800, 480]
+scale = 1
+# One theme for now: matinee does not yet drive the Windows theme, so a
+# Win32 app like Notepad looks the same in both.
+themes = ["light"]
+
+[launch]
+app = "notepad.exe"
+wait_for = "Untitled - Notepad"
+
+[[scene]]
+caption = "Type a note"
+steps = [
+  { type = "Hello from matinee", hold = "1s" },
+  { expect = "Hello from matinee" },
+]

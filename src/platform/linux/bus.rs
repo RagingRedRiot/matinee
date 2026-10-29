@@ -4,14 +4,15 @@
 //! Apps find the accessibility bus through `AT_SPI_BUS_ADDRESS`, or by
 //! asking the session bus, where matinee answers `org.a11y.Bus` and reports
 //! accessibility as enabled through `org.a11y.Status`. Matinee also serves
-//! the desktop portal's settings (see [`crate::portal`]).
+//! the desktop portal's settings (see [`super::portal`]).
 //!
 //! Neither bus starts services on demand, so what runs in a session does
 //! not depend on what the host has installed. `dbus-daemon` and
 //! `at-spi2-registryd` come with any desktop that runs AT-SPI: at-spi2-core
 //! starts its own accessibility bus with a D-Bus daemon.
 
-use crate::{boundary::Boundary, portal, story::Theme};
+use super::{boundary::Boundary, portal};
+use crate::story::Theme;
 use std::{
     io,
     path::Path,

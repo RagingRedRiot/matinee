@@ -260,3 +260,29 @@ a runtime dependency.
   camera path, eased pointer motion, and capture schedule are planned on
   that timeline, so the same story yields the same camera path. Waiting for
   the app (window appearance, assertions, timeouts) still uses real time.
+- **Platform layer:** the compositor, the boundary, the buses, the
+  accessibility client, the shell behind the terminal pane, and the
+  viewport window are the parts that depend on the desktop platform. They
+  live under `src/platform`, one implementation per platform selected at
+  compile time, behind the same names: a display that renders frames and
+  takes input, a boundary that runs commands, an accessibility tree, and a
+  shell. The storyboard, session, runner, camera, overlays, and encoder are
+  the same everywhere. Linux has the full pipeline. Windows runs terminal
+  stories through PowerShell on a pseudo console, and GUI stories by
+  launching apps onto a private desktop of the session's own, in a job
+  that ends them with the session, placing and capturing each window with
+  `PrintWindow`, posting them input, and reading their UI Automation trees
+  for named targets. Clicks and typed characters act on controls through
+  UI Automation, since many apps, WinUI and WPF ones among them, ignore
+  posted input; what UI Automation cannot do is posted. Packaged apps,
+  which Windows opens on the user's own desktop, and WPF apps, which draw
+  nothing there unless they render in software, need `--screen`
+  instead: apps open on the user's screen and take real input through the
+  input queue, sent only when it lands on the story's windows, and
+  packaged apps start through the shell by app ID. The boundary is a fresh
+  profile, not yet isolation. Apps draw at the display's scaling, which
+  matinee does not set, so the story's scale must match it for the
+  zoom camera to show them at the size the story lays them out for, and
+  matinee warns when it does not. Still missing on Windows: driving the
+  system theme, so light and dark look alike.
+  [docs/windows.md](docs/windows.md) is the guide.

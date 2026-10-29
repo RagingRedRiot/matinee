@@ -25,7 +25,82 @@ pub struct Story {
     pub camera: Camera,
     pub session: Session,
     pub terminal: TerminalPane,
+    /// Where captions go, unless a scene says otherwise.
+    pub captions: CaptionPosition,
+    /// How overlays look, in each theme.
+    pub style: Style,
     pub scenes: Vec<Scene>,
+}
+
+/// The colors and text size of captions, badges, highlights, and click
+/// ripples, for each theme.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Style {
+    pub light: Look,
+    pub dark: Look,
+}
+
+impl Style {
+    /// How overlays look in `theme`.
+    pub fn look(&self, theme: Theme) -> &Look {
+        match theme {
+            Theme::Light => &self.light,
+            Theme::Dark => &self.dark,
+        }
+    }
+}
+
+/// How overlays look in one theme. Colors are `0xRRGGBB`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Look {
+    /// Highlights, their labels, and their numbers.
+    pub accent: u32,
+    pub ripple: u32,
+    /// How dark a spotlight makes the rest of the frame, from 0 to 1.
+    pub spotlight_dim: f64,
+    pub caption_text: u32,
+    /// The backing of a caption or key badge over the frame, and its
+    /// border.
+    pub caption_backing: u32,
+    pub caption_border: u32,
+    /// A caption band's background.
+    pub band: u32,
+    /// Caption and label text size in points; `None` sizes it from the
+    /// frame's width.
+    pub text_size: Option<f32>,
+}
+
+impl Look {
+    /// How overlays look in `theme` unless a storyboard says otherwise.
+    pub fn default_for(theme: Theme) -> Look {
+        let common = |caption_text, caption_backing, caption_border, band| Look {
+            accent: 0xf59e0b,
+            ripple: 0x3b82f6,
+            spotlight_dim: 0.55,
+            caption_text,
+            caption_backing,
+            caption_border,
+            band,
+            text_size: None,
+        };
+        match theme {
+            Theme::Light => common(0x0f172a, 0xffffff, 0xcbd5e1, 0xf8fafc),
+            Theme::Dark => common(0xf8fafc, 0x1e293b, 0x475569, 0x0b1120),
+        }
+    }
+}
+
+/// Where a caption goes: over the frame at its bottom or top, over the
+/// frame on the half away from the action, or in a band added below or
+/// above the frame, where it covers nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CaptionPosition {
+    Bottom,
+    Top,
+    Auto,
+    Below,
+    Above,
 }
 
 /// matinee's terminal pane, drawn into the frame beside the app windows.
@@ -87,7 +162,23 @@ impl Story {
                 Action::HoverAt(_)
                 | Action::ClickAt(_)
                 | Action::DragAt { .. }
-                | Action::Camera(CameraMove::FocusAt { .. }) => coordinates = true,
+                | Action::Camera(CameraMove::FocusAt { .. })
+                | Action::Highlight(Highlight {
+                    mark: Mark::Area { .. },
+                    ..
+                }) => coordinates = true,
+                Action::Highlight(Highlight {
+                    mark: Mark::Target(t),
+                    ..
+                }) if !terminal
+                    || t.role.is_some()
+                    || t.within.is_some()
+                    || t.near.is_some()
+                    || t.window.is_some()
+                    || t.app.is_some() =>
+                {
+                    semantic = true;
+                }
                 Action::Type {
                     terminal: false, ..
                 }
@@ -216,6 +307,8 @@ pub enum CameraMode {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Scene {
     pub caption: Option<String>,
+    /// Where this scene's caption goes, in place of the story's.
+    pub caption_position: Option<CaptionPosition>,
     pub steps: Vec<Step>,
 }
 
@@ -285,8 +378,53 @@ pub enum Action {
         terminal: bool,
     },
     Camera(CameraMove),
+    /// Mark part of the screen until the scene ends or highlights are
+    /// cleared.
+    Highlight(Highlight),
+    /// Take down the scene's highlights.
+    ClearHighlights,
     /// Only a hold.
     Pause,
+}
+
+/// A highlight: what it marks and how.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Highlight {
+    pub mark: Mark,
+    pub style: HighlightStyle,
+    /// A callout shown beside the mark.
+    pub label: Option<String>,
+    /// A numbered marker on the mark's corner, for a sequence of steps.
+    pub number: Option<u32>,
+    /// The mark's color, `0xRRGGBB`, in place of the style's accent.
+    pub color: Option<u32>,
+}
+
+/// What a highlight marks.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Mark {
+    /// A control by name, or, with no context besides the name, text in
+    /// the terminal pane or in an app's text.
+    Target(Target),
+    /// The lines from one holding `from` through one holding `to`, in the
+    /// terminal pane or an app's text.
+    Lines { from: String, to: String },
+    /// A rectangle in a window, in points: x, y, width, height, with
+    /// negative x and y counting from the right and bottom edges.
+    Area {
+        rect: [f64; 4],
+        window: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HighlightStyle {
+    /// An outline around the mark.
+    #[default]
+    Box,
+    /// The rest of the screen dimmed, with the mark outlined.
+    Spotlight,
 }
 
 /// A point in a window, in points from its top-left corner; a negative
@@ -375,6 +513,26 @@ impl Story {
     pub fn steps(&self) -> impl Iterator<Item = &Step> {
         self.scenes.iter().flat_map(|s| &s.steps)
     }
+
+    /// Where `scene`'s caption goes.
+    pub fn caption_position(&self, scene: &Scene) -> CaptionPosition {
+        scene.caption_position.unwrap_or(self.captions)
+    }
+
+    /// Whether some caption goes in a band above the frame, and whether
+    /// one goes in a band below it.
+    pub fn caption_bands(&self) -> (bool, bool) {
+        let captioned = || {
+            self.scenes
+                .iter()
+                .filter(|s| s.caption.is_some())
+                .map(|s| self.caption_position(s))
+        };
+        (
+            captioned().any(|p| p == CaptionPosition::Above),
+            captioned().any(|p| p == CaptionPosition::Below),
+        )
+    }
 }
 
 /// Parse a duration written with a unit: `2.4s` or `600ms`.
@@ -403,8 +561,117 @@ struct RawStory {
     camera: Option<RawCamera>,
     session: Option<RawSession>,
     terminal: Option<RawTerminal>,
+    captions: Option<RawCaptions>,
+    style: Option<RawStyle>,
     #[serde(default)]
     scene: Vec<RawScene>,
+}
+
+/// `[style]`: keys for every theme, and `light` and `dark` tables of the
+/// same keys for one.
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawStyle {
+    accent: Option<String>,
+    ripple: Option<String>,
+    spotlight_dim: Option<f64>,
+    caption_text: Option<String>,
+    caption_backing: Option<String>,
+    caption_border: Option<String>,
+    band: Option<String>,
+    text_size: Option<f32>,
+    light: Option<RawLook>,
+    dark: Option<RawLook>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawLook {
+    accent: Option<String>,
+    ripple: Option<String>,
+    spotlight_dim: Option<f64>,
+    caption_text: Option<String>,
+    caption_backing: Option<String>,
+    caption_border: Option<String>,
+    band: Option<String>,
+    text_size: Option<f32>,
+}
+
+impl RawStyle {
+    fn check(self) -> Result<Style, String> {
+        let base = RawLook {
+            accent: self.accent,
+            ripple: self.ripple,
+            spotlight_dim: self.spotlight_dim,
+            caption_text: self.caption_text,
+            caption_backing: self.caption_backing,
+            caption_border: self.caption_border,
+            band: self.band,
+            text_size: self.text_size,
+        };
+        let light = base.with(self.light.unwrap_or_default(), Theme::Light, "style.light")?;
+        let dark = base.with(self.dark.unwrap_or_default(), Theme::Dark, "style.dark")?;
+        Ok(Style { light, dark })
+    }
+}
+
+impl RawLook {
+    /// `theme`'s look: its defaults, then these keys, then `over`'s, which
+    /// are reported as `table` when wrong.
+    fn with(&self, over: RawLook, theme: Theme, table: &str) -> Result<Look, String> {
+        let mut look = Look::default_for(theme);
+        for (keys, table) in [(self, "style"), (&over, table)] {
+            for (name, value, field) in [
+                ("accent", &keys.accent, &mut look.accent),
+                ("ripple", &keys.ripple, &mut look.ripple),
+                ("caption_text", &keys.caption_text, &mut look.caption_text),
+                (
+                    "caption_backing",
+                    &keys.caption_backing,
+                    &mut look.caption_backing,
+                ),
+                (
+                    "caption_border",
+                    &keys.caption_border,
+                    &mut look.caption_border,
+                ),
+                ("band", &keys.band, &mut look.band),
+            ] {
+                if let Some(text) = value {
+                    *field = parse_color(text).map_err(|e| format!("{table}.{name}: {e}"))?;
+                }
+            }
+            if let Some(dim) = keys.spotlight_dim {
+                if !(0.0..=1.0).contains(&dim) {
+                    return Err(format!("{table}.spotlight_dim must be from 0 to 1"));
+                }
+                look.spotlight_dim = dim;
+            }
+            if let Some(size) = keys.text_size {
+                if !(8.0..=72.0).contains(&size) {
+                    return Err(format!("{table}.text_size must be from 8 to 72 points"));
+                }
+                look.text_size = Some(size);
+            }
+        }
+        Ok(look)
+    }
+}
+
+/// A color written `#rrggbb`, as `0xRRGGBB`.
+pub fn parse_color(text: &str) -> Result<u32, String> {
+    let bad = || format!("`{text}` is not a color; write it like `#f59e0b`");
+    let hex = text.strip_prefix('#').ok_or_else(bad)?;
+    if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(bad());
+    }
+    u32::from_str_radix(hex, 16).map_err(|_| bad())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCaptions {
+    position: Option<CaptionPosition>,
 }
 
 #[derive(Deserialize)]
@@ -477,6 +744,7 @@ struct RawSession {
 #[serde(deny_unknown_fields)]
 struct RawScene {
     caption: Option<String>,
+    caption_position: Option<CaptionPosition>,
     steps: Vec<RawStep>,
 }
 
@@ -506,6 +774,13 @@ struct RawStep {
     type_text: Option<String>,
     key: Option<String>,
     camera: Option<RawCameraMove>,
+    highlight: Option<RawHighlight>,
+    highlight_at: Option<[f64; 4]>,
+    style: Option<HighlightStyle>,
+    label: Option<String>,
+    number: Option<u32>,
+    color: Option<String>,
+    clear: Option<String>,
     role: Option<String>,
     within: Option<String>,
     near: Option<String>,
@@ -514,6 +789,20 @@ struct RawStep {
     app: Option<String>,
     hold: Option<String>,
     timeout: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawHighlight {
+    Name(String),
+    Lines(RawLines),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawLines {
+    from: String,
+    to: String,
 }
 
 #[derive(Deserialize)]
@@ -662,8 +951,15 @@ impl RawStory {
                     .map_err(|e| format!("scene {}, step {}: {e}", si + 1, ti + 1))?;
                 steps.push(step);
             }
+            if raw.caption_position.is_some() && raw.caption.is_none() {
+                return Err(format!(
+                    "scene {}: caption_position is set, but the scene has no caption",
+                    si + 1
+                ));
+            }
             scenes.push(Scene {
                 caption: raw.caption,
+                caption_position: raw.caption_position,
                 steps,
             });
         }
@@ -708,6 +1004,11 @@ impl RawStory {
             return Err(format!("session.path: `{m}` is not a path"));
         }
 
+        let captions = self
+            .captions
+            .and_then(|c| c.position)
+            .unwrap_or(CaptionPosition::Bottom);
+        let style = self.style.unwrap_or_default().check()?;
         Ok(Story {
             dir,
             demo,
@@ -716,6 +1017,8 @@ impl RawStory {
             camera,
             session,
             terminal,
+            captions,
+            style,
             scenes,
         })
     }
@@ -786,6 +1089,28 @@ fn check_running(scenes: &[Scene]) -> Result<(), String> {
 }
 
 impl RawStep {
+    /// A highlight of `mark`, with this step's style, label, and number.
+    fn highlight(&mut self, mark: Mark) -> Result<Action, String> {
+        if self.label.as_ref().is_some_and(|l| l.trim().is_empty()) {
+            return Err("`label` is empty".into());
+        }
+        if self.number == Some(0) {
+            return Err("`number` counts from 1".into());
+        }
+        let color = self
+            .color
+            .take()
+            .map(|c| parse_color(&c).map_err(|e| format!("color: {e}")))
+            .transpose()?;
+        Ok(Action::Highlight(Highlight {
+            mark,
+            style: self.style.take().unwrap_or_default(),
+            label: self.label.take(),
+            number: self.number.take(),
+            color,
+        }))
+    }
+
     fn check(mut self, launches: &[Launch], dir: &Path, max_zoom: f64) -> Result<Step, String> {
         let hold = duration("hold", self.hold.take())?;
         let timeout = duration("timeout", self.timeout.take())?;
@@ -806,6 +1131,9 @@ impl RawStep {
             ("type", self.type_text.is_some()),
             ("key", self.key.is_some()),
             ("camera", self.camera.is_some()),
+            ("highlight", self.highlight.is_some()),
+            ("highlight_at", self.highlight_at.is_some()),
+            ("clear", self.clear.is_some()),
         ]
         .into_iter()
         .filter_map(|(name, set)| set.then_some(name))
@@ -837,7 +1165,12 @@ impl RawStep {
         only_with("to_role", self.to_role.is_some(), &["drag"])?;
         only_with("to_within", self.to_within.is_some(), &["drag"])?;
         only_with("drag_to", self.drag_to.is_some(), &["drag_from"])?;
-        let at = ["hover_at", "click_at", "drag_from"];
+        let marks = ["highlight", "highlight_at"];
+        only_with("style", self.style.is_some(), &marks)?;
+        only_with("label", self.label.is_some(), &marks)?;
+        only_with("number", self.number.is_some(), &marks)?;
+        only_with("color", self.color.is_some(), &marks)?;
+        let at = ["hover_at", "click_at", "drag_from", "highlight_at"];
         let targeted = [
             "wait_for",
             "expect",
@@ -845,6 +1178,7 @@ impl RawStep {
             "click",
             "drag",
             "drag_slider",
+            "highlight",
         ];
         let context = [
             ("role", self.role.is_some()),
@@ -881,9 +1215,10 @@ impl RawStep {
             return Err("this step acts on an app window, but the storyboard launches none".into());
         }
 
-        // A plain `wait_for` or `expect` may be text in the terminal pane.
-        let terminal_text =
-            matches!(action, Some("wait_for" | "expect")) && context.iter().all(|(_, set)| !set);
+        // A plain `wait_for`, `expect`, or `highlight` may be text in the
+        // terminal pane.
+        let terminal_text = matches!(action, Some("wait_for" | "expect" | "highlight"))
+            && context.iter().all(|(_, set)| !set);
         let targets_app = action.is_some_and(|a| targeted.contains(&a)) && !terminal_text
             || matches!(
                 self.camera,
@@ -1075,6 +1410,43 @@ impl RawStep {
                         zoom: f.zoom,
                     })
                 }
+            },
+            Some("highlight") => {
+                let mark = match self.highlight.take().unwrap() {
+                    RawHighlight::Name(name) => Mark::Target(target(name, &mut self)),
+                    RawHighlight::Lines(lines) => {
+                        if let Some((key, _)) = context.iter().find(|(_, set)| *set) {
+                            return Err(format!(
+                                "`{key}` does not apply to a highlight of lines, which \
+                                 looks in the terminal pane and every app's text"
+                            ));
+                        }
+                        Mark::Lines {
+                            from: lines.from,
+                            to: lines.to,
+                        }
+                    }
+                };
+                self.highlight(mark)?
+            }
+            Some("highlight_at") => {
+                let rect = self.highlight_at.unwrap();
+                if rect[2] <= 0.0 || rect[3] <= 0.0 {
+                    return Err(
+                        "highlight_at is [x, y, width, height], with a positive size".into(),
+                    );
+                }
+                let window = self.window.take();
+                self.highlight(Mark::Area { rect, window })?
+            }
+            Some("clear") => match self.clear.take().as_deref() {
+                Some("highlights") => Action::ClearHighlights,
+                Some(other) => {
+                    return Err(format!(
+                        "clear = \"{other}\" clears nothing; use clear = \"highlights\""
+                    ));
+                }
+                None => unreachable!(),
             },
             Some(other) => unreachable!("unhandled action {other}"),
         };

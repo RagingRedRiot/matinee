@@ -13,10 +13,11 @@
 
 use crate::{
     camera::Rect,
-    compositor::Frame,
+    frame::Frame,
     lzw,
-    overlay::{self, Events, Painter, Shown},
+    overlay::{self, Events, Layout, Painter, Shown},
     palette::{self, Histogram, Nearest},
+    story::{CaptionPosition, HighlightStyle, Look, Theme},
 };
 use std::{
     borrow::Cow,
@@ -58,7 +59,13 @@ type Tick = (usize, Option<(i32, i32)>);
 pub struct Recording {
     scale: usize,
     pub width: usize,
+    /// The output's height, with any caption bands.
     pub height: usize,
+    /// The frame's height, without caption bands.
+    frame_height: usize,
+    /// Rows of caption band above the frame, and below it.
+    band_above: usize,
+    band_below: usize,
     /// Distinct app images, at output size, as 0xRRGGBB.
     images: Vec<Vec<u32>>,
     /// For each tick, the image shown and where the pointer was, if shown.
@@ -76,6 +83,11 @@ pub struct Recording {
     /// Where each part of the recording starts, by tick, and its name:
     /// the lead-in, each scene, and the end. Sizes are reported per part.
     segments: Vec<(usize, String)>,
+    /// Ticks to save as still pictures.
+    stills: Vec<usize>,
+    /// The theme being recorded, and how overlays look in it.
+    theme: Theme,
+    look: Look,
     painter: Painter,
 }
 
@@ -134,12 +146,15 @@ impl<W: Write> Write for Counting<W> {
 
 impl Recording {
     /// A recording of an output `scale` times larger than `width` by
-    /// `height`.
-    pub fn new(width: usize, height: usize, scale: usize) -> Recording {
+    /// `height`, in `theme`, with overlays as `look` says.
+    pub fn new(width: usize, height: usize, scale: usize, theme: Theme, look: &Look) -> Recording {
         Recording {
             scale,
             width,
             height,
+            frame_height: height,
+            band_above: 0,
+            band_below: 0,
             images: vec![],
             ticks: vec![],
             moving: vec![],
@@ -148,8 +163,21 @@ impl Recording {
             pane: None,
             lossy: LOSSY,
             segments: vec![(0, "start".into())],
-            painter: Painter::new(width, height),
+            stills: vec![],
+            theme,
+            look: look.clone(),
+            painter: Painter::new(width, height, theme, look),
         }
+    }
+
+    /// Add a caption band above the frame, below it, or both, which makes
+    /// the output taller. Call before the first tick.
+    pub fn set_bands(&mut self, above: bool, below: bool) {
+        let band = Painter::band_height(self.width, &self.look);
+        self.band_above = if above { band } else { 0 };
+        self.band_below = if below { band } else { 0 };
+        self.height = self.frame_height + self.band_above + self.band_below;
+        self.painter = Painter::new(self.width, self.height, self.theme, &self.look);
     }
 
     /// Let lossy compression move a color by up to `tolerance` in any
@@ -169,9 +197,35 @@ impl Recording {
         self.segments.push((self.ticks.len(), label.into()));
     }
 
-    /// Caption the ticks from the next one on, or stop with `None`.
-    pub fn caption(&mut self, text: Option<&str>) {
-        self.events.caption(self.ticks.len(), text);
+    /// Caption the ticks from the next one on at `position`, or stop with
+    /// `None`.
+    pub fn caption(&mut self, text: Option<&str>, position: CaptionPosition) {
+        self.events.caption(self.ticks.len(), text, position);
+    }
+
+    /// Mark `rect` on the screen, in points, from the next tick on.
+    pub fn highlight(
+        &mut self,
+        rect: Rect,
+        style: HighlightStyle,
+        label: Option<&str>,
+        number: Option<u32>,
+        color: Option<u32>,
+    ) {
+        self.events
+            .highlight(self.ticks.len(), rect, style, label, number, color);
+    }
+
+    /// Take down every highlight from the next tick on.
+    pub fn clear_highlights(&mut self) {
+        self.events.clear_highlights(self.ticks.len());
+    }
+
+    /// Keep the last tick as a still picture.
+    pub fn still(&mut self) {
+        if let Some(last) = self.ticks.len().checked_sub(1) {
+            self.stills.push(last);
+        }
     }
 
     /// Show a ripple where the pointer is on the next tick.
@@ -188,16 +242,27 @@ impl Recording {
     /// camera shows (in logical points), and the pointer, already placed in
     /// the output, when it is shown.
     pub fn add(&mut self, frame: &Frame, view: Rect, pointer: Option<(f64, f64)>) {
-        let whole = view == Rect::new(0.0, 0.0, self.width as f64, self.height as f64);
-        let image = if whole {
-            downscale(frame, self.scale, self.width, self.height)
+        let (w, h) = (self.width, self.frame_height);
+        let whole = view == Rect::new(0.0, 0.0, w as f64, h as f64);
+        let mut image = if whole {
+            downscale(frame, self.scale, w, h)
         } else {
-            resample(frame, view, self.scale, self.width, self.height)
+            resample(frame, view, self.scale, w, h)
         };
+        if self.band_above + self.band_below > 0 {
+            let mut banded = vec![0; w * self.height];
+            banded[self.band_above * w..(self.band_above + h) * w].copy_from_slice(&image);
+            self.painter
+                .fill_band(&mut banded, 0, self.band_above, false);
+            self.painter
+                .fill_band(&mut banded, self.band_above + h, self.band_below, true);
+            image = banded;
+        }
         if self.images.last() != Some(&image) {
             self.images.push(image);
         }
-        let pointer = pointer.map(|(x, y)| (x.round() as i32, y.round() as i32));
+        let top = self.band_above as f64;
+        let pointer = pointer.map(|(x, y)| (x.round() as i32, (y + top).round() as i32));
         self.ticks.push((self.images.len() - 1, pointer));
         self.moving
             .push(self.views.last().is_some_and(|&v| v != view));
@@ -207,10 +272,42 @@ impl Recording {
     /// What the overlays show on each tick.
     fn shown(&self, fps: u32) -> Vec<Shown> {
         let pointer = |i: usize| self.ticks.get(i).and_then(|t| t.1);
+        let (w, h, top) = (self.width, self.frame_height, self.band_above as i32);
         (0..self.ticks.len())
             .map(|i| {
-                let area = overlay::free_area(self.views[i], self.pane, self.width, self.height);
-                self.events.shown(i, self.ticks.len(), fps, pointer, area)
+                let view = self.views[i];
+                let (ax, ay, aw, ah) = overlay::free_area(view, self.pane, w, h);
+                // Where a rectangle on the screen lands in the output.
+                let map = |r: Rect| {
+                    let sx = w as f64 / view.w;
+                    let sy = h as f64 / view.h;
+                    let x = ((r.x - view.x) * sx).round() as i32;
+                    let y = ((r.y - view.y) * sy).round() as i32 + top;
+                    (x, y, (r.w * sx).round() as i32, (r.h * sy).round() as i32)
+                };
+                let layout = Layout {
+                    frame: (0, top, w as i32, h as i32),
+                    area: (ax, ay + top, aw, ah),
+                    map: &map,
+                };
+                self.events
+                    .shown(i, self.ticks.len(), fps, pointer, &layout)
+            })
+            .collect()
+    }
+
+    /// The still pictures asked for, with their overlays, in order.
+    pub fn stills(&self, fps: u32) -> Vec<Frame> {
+        let shown = self.shown(fps);
+        self.stills
+            .iter()
+            .map(|&tick| {
+                let (image, pointer) = self.ticks[tick];
+                Frame {
+                    width: self.width,
+                    height: self.height,
+                    pixels: self.compose(image, pointer, &shown[tick].settled()),
+                }
             })
             .collect()
     }
@@ -693,7 +790,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("matinee-gif-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("t.gif");
-        let mut rec = Recording::new(20, 20, 1);
+        let mut rec = Recording::new(
+            20,
+            20,
+            1,
+            crate::story::Theme::Light,
+            &Look::default_for(crate::story::Theme::Light),
+        );
         // 15 ticks of one image, then 15 of another: one second at 15 fps
         // is 100 centiseconds each.
         for _ in 0..15 {
@@ -727,7 +830,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("matinee-gifq-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("t.gif");
-        let mut rec = Recording::new(20, 20, 1);
+        let mut rec = Recording::new(
+            20,
+            20,
+            1,
+            crate::story::Theme::Light,
+            &Look::default_for(crate::story::Theme::Light),
+        );
         // A second each: the pointer moves but stays off screen, so the
         // first two seconds look the same; then the image changes.
         for (color, pointer) in [
@@ -753,7 +862,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("t.gif");
         let (dark, light) = (0xff203040u32, 0xffffffffu32);
-        let mut rec = Recording::new(20, 20, 1);
+        let mut rec = Recording::new(
+            20,
+            20,
+            1,
+            crate::story::Theme::Light,
+            &Look::default_for(crate::story::Theme::Light),
+        );
         let mut images = vec![frame(20, 20, dark)];
         // Two opposite corners change, so the rectangle covers everything
         // between them.
@@ -809,7 +924,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("matinee-gifs-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("t.gif");
-        let mut rec = Recording::new(20, 20, 1);
+        let mut rec = Recording::new(
+            20,
+            20,
+            1,
+            crate::story::Theme::Light,
+            &Look::default_for(crate::story::Theme::Light),
+        );
         rec.add(&frame(20, 20, 0xff102030), all(), None);
         rec.segment("scene 1");
         for _ in 0..15 {
@@ -838,5 +959,72 @@ mod tests {
         assert_eq!(written.segments[1].seconds, 1.0);
         assert_eq!(written.segments[1].camera_bytes, 0);
         assert!(written.segments[2].camera_bytes > 0, "the view changed");
+    }
+
+    #[test]
+    fn a_caption_band_makes_the_output_taller_and_moves_the_pointer() {
+        let mut rec = Recording::new(
+            20,
+            20,
+            1,
+            crate::story::Theme::Dark,
+            &Look::default_for(crate::story::Theme::Dark),
+        );
+        rec.set_bands(false, true);
+        let band = Painter::band_height(20, &Look::default_for(crate::story::Theme::Dark));
+        assert_eq!(rec.height, 20 + band);
+        rec.add(&frame(20, 20, 0xff102030), all(), Some((5.0, 6.0)));
+        let image = &rec.images[0];
+        assert_eq!(image.len(), 20 * (20 + band));
+        assert_eq!(image[0], 0x102030, "the frame is on top");
+        assert_ne!(image[(20 + band - 2) * 20], 0x102030, "the band is below");
+        assert_eq!(rec.ticks[0].1, Some((5, 6)));
+
+        let mut above = Recording::new(
+            20,
+            20,
+            1,
+            crate::story::Theme::Dark,
+            &Look::default_for(crate::story::Theme::Dark),
+        );
+        above.set_bands(true, false);
+        above.add(&frame(20, 20, 0xff102030), all(), Some((5.0, 6.0)));
+        assert_eq!(above.ticks[0].1, Some((5, 6 + band as i32)));
+        assert_eq!(
+            above.images[0][band * 20],
+            0x102030,
+            "the frame is under the band"
+        );
+    }
+
+    #[test]
+    fn stills_are_whole_outputs_with_their_highlights() {
+        let mut rec = Recording::new(
+            20,
+            20,
+            1,
+            crate::story::Theme::Light,
+            &Look::default_for(crate::story::Theme::Light),
+        );
+        rec.add(&frame(20, 20, 0xffffffff), all(), None);
+        rec.highlight(
+            Rect::new(4.0, 4.0, 12.0, 12.0),
+            HighlightStyle::Spotlight,
+            None,
+            None,
+            None,
+        );
+        for _ in 0..10 {
+            rec.add(&frame(20, 20, 0xffffffff), all(), None);
+        }
+        rec.still();
+        let stills = rec.stills(15);
+        assert_eq!(stills.len(), 1);
+        let still = &stills[0];
+        assert_eq!((still.width, still.height), (20, 20));
+        assert!(
+            still.pixel(0, 0) & 0xff < 0xff,
+            "the spotlight dims the corner"
+        );
     }
 }

@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! The isolation contract from BUILD-DECISIONS.md, checked through
 //! `matinee shell`. These need a kernel that allows unprivileged user
 //! namespaces.

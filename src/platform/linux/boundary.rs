@@ -205,6 +205,14 @@ impl Boundary {
         Ok(self)
     }
 
+    /// There is no screen to run on: a session always draws on its own
+    /// compositor, which shows every app.
+    pub fn on_screen(self) -> io::Result<Boundary> {
+        Err(io::Error::other(
+            "--screen is for Windows; on Linux every app runs in the session's own compositor",
+        ))
+    }
+
     /// Whether the work runs inside namespaces.
     pub fn is_isolated(&self) -> bool {
         self.isolated
@@ -259,6 +267,30 @@ impl Boundary {
             .env("XDG_DATA_HOME", format!("{home}/.local/share"))
             .env("XDG_CACHE_HOME", format!("{home}/.cache"))
             .env("XDG_STATE_HOME", format!("{home}/.local/state"));
+        cmd
+    }
+
+    /// Start `program` with `args` and `env` added to the boundary's
+    /// environment, as a launched app.
+    pub fn spawn_app(
+        &self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+    ) -> io::Result<super::Child> {
+        self.command(program)
+            .args(args)
+            .envs(env.iter().map(|(k, v)| (k, v)))
+            .spawn()
+            .map(super::Child::new)
+            .map_err(|e| io::Error::new(e.kind(), format!("{program}: {e}")))
+    }
+
+    /// A command that runs `script` in the session's shell, as
+    /// [`Boundary::command`] would run a program.
+    pub fn shell(&self, script: &str) -> Command {
+        let mut cmd = self.command("bash");
+        cmd.args(["-c", script]);
         cmd
     }
 

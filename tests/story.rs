@@ -1,4 +1,7 @@
-use matinee::story::{Action, CameraMove, Story, Theme, parse_duration};
+use matinee::story::{
+    Action, CameraMove, CaptionPosition, Highlight, HighlightStyle, Look, Mark, Story, Theme,
+    parse_duration,
+};
 use std::{path::PathBuf, time::Duration};
 
 const HEAD: &str = r#"
@@ -410,4 +413,142 @@ fn a_placed_pane_leaves_room_for_windows_without_a_launch() {
     assert!(!story("[terminal]\nfont_size = 18"));
     assert!(story("[terminal]\nposition = \"right\""));
     assert!(story("[terminal]\nsize = 200"));
+}
+
+#[test]
+fn captions_go_where_the_story_or_the_scene_says() {
+    let text = format!(
+        "{HEAD}\n[captions]\nposition = \"below\"\n\
+         [[scene]]\ncaption = \"One\"\nsteps = [{{ hold = \"1s\" }}]\n\
+         [[scene]]\ncaption = \"Two\"\ncaption_position = \"top\"\nsteps = [{{ hold = \"1s\" }}]\n"
+    );
+    let story = Story::parse(&text, PathBuf::from("tests")).unwrap();
+    assert_eq!(
+        story.caption_position(&story.scenes[0]),
+        CaptionPosition::Below
+    );
+    assert_eq!(
+        story.caption_position(&story.scenes[1]),
+        CaptionPosition::Top
+    );
+    assert_eq!(story.caption_bands(), (false, true));
+    // Without a [captions] table, captions go at the bottom of the frame.
+    let plain = parse(r#"{ hold = "1s" }"#).unwrap();
+    assert_eq!(plain.captions, CaptionPosition::Bottom);
+    assert_eq!(plain.caption_bands(), (false, false));
+}
+
+#[test]
+fn a_caption_position_needs_a_caption() {
+    let text =
+        format!("{HEAD}\n[[scene]]\ncaption_position = \"top\"\nsteps = [{{ hold = \"1s\" }}]\n");
+    let e = Story::parse(&text, PathBuf::from("tests")).unwrap_err();
+    assert!(e.contains("no caption"), "{e}");
+}
+
+#[test]
+fn highlights_name_what_they_mark_and_how() {
+    let story = parse(
+        r##"{ highlight = "Total", role = "label", label = "The result", number = 2, color = "#22c55e" },
+           { highlight = { from = "== Summary", to = "Total" }, style = "spotlight" },
+           { highlight_at = [10, 20, 30, 40], window = "Main" },
+           { clear = "highlights" }"##,
+    )
+    .unwrap();
+    let steps: Vec<&Action> = story.steps().map(|s| &s.action).collect();
+    let Action::Highlight(Highlight {
+        mark: Mark::Target(target),
+        style: HighlightStyle::Box,
+        label: Some(label),
+        number: Some(2),
+        color: Some(0x22c55e),
+    }) = steps[0]
+    else {
+        panic!("expected a named highlight: {:?}", steps[0]);
+    };
+    assert_eq!(
+        (target.name.as_str(), target.role.as_deref()),
+        ("Total", Some("label"))
+    );
+    assert_eq!(label, "The result");
+    assert!(matches!(
+        steps[1],
+        Action::Highlight(Highlight { mark: Mark::Lines { from, to }, style: HighlightStyle::Spotlight, .. })
+            if from == "== Summary" && to == "Total"
+    ));
+    assert!(matches!(
+        steps[2],
+        Action::Highlight(Highlight { mark: Mark::Area { rect: [10.0, 20.0, 30.0, 40.0], window: Some(w) }, .. })
+            if w == "Main"
+    ));
+    assert_eq!(steps[3], &Action::ClearHighlights);
+}
+
+#[test]
+fn highlight_mistakes_are_named() {
+    assert!(error(r#"{ click = "Go", label = "x" }"#).contains("`label` only applies"));
+    assert!(error(r#"{ highlight = "Go", number = 0 }"#).contains("counts from 1"));
+    assert!(error(r#"{ highlight_at = [0, 0, 0, 10] }"#).contains("positive size"));
+    assert!(error(r#"{ clear = "captions" }"#).contains("clears nothing"));
+    assert!(
+        error(r#"{ highlight = { from = "a", to = "b" }, role = "label" }"#)
+            .contains("does not apply to a highlight of lines")
+    );
+    assert!(error(r#"{ highlight = "Go", style = "glow" }"#).contains("unknown variant"));
+}
+
+#[test]
+fn plain_highlights_of_text_need_no_app() {
+    let text = "[demo]\noutput = \"t\"\nsize = [400, 300]\n\
+                [[scene]]\nsteps = [{ run = \"echo hi\" }, { highlight = \"hi\" }]\n";
+    Story::parse(text, PathBuf::from("tests")).unwrap();
+    let qualified = "[demo]\noutput = \"t\"\nsize = [400, 300]\n\
+                     [[scene]]\nsteps = [{ run = \"echo hi\" }, { highlight = \"hi\", role = \"label\" }]\n";
+    let e = Story::parse(qualified, PathBuf::from("tests")).unwrap_err();
+    assert!(e.contains("launches none"), "{e}");
+}
+
+#[test]
+fn style_sets_overlay_colors_for_every_theme_and_each_one() {
+    let text = format!(
+        "{HEAD}\n[style]\naccent = \"#2563eb\"\ntext_size = 20\n\
+         [style.dark]\naccent = \"#60a5fa\"\ncaption_backing = \"#000000\"\n\
+         [[scene]]\nsteps = [{{ hold = \"1s\" }}]\n"
+    );
+    let story = Story::parse(&text, PathBuf::from("tests")).unwrap();
+    let light = story.style.look(Theme::Light);
+    let dark = story.style.look(Theme::Dark);
+    assert_eq!((light.accent, dark.accent), (0x2563eb, 0x60a5fa));
+    assert_eq!((light.text_size, dark.text_size), (Some(20.0), Some(20.0)));
+    assert_eq!(dark.caption_backing, 0x000000);
+    // What the story leaves alone keeps each theme's default.
+    assert_eq!(
+        light.caption_backing,
+        Look::default_for(Theme::Light).caption_backing
+    );
+    assert_eq!(light.ripple, Look::default_for(Theme::Light).ripple);
+}
+
+#[test]
+fn without_a_style_overlays_look_as_they_always_have() {
+    let story = parse(r#"{ hold = "1s" }"#).unwrap();
+    for theme in [Theme::Light, Theme::Dark] {
+        assert_eq!(story.style.look(theme), &Look::default_for(theme));
+    }
+}
+
+#[test]
+fn style_mistakes_are_named() {
+    let style = |table: &str| {
+        let text = format!("{HEAD}\n{table}\n[[scene]]\nsteps = [{{ hold = \"1s\" }}]\n");
+        Story::parse(&text, PathBuf::from("tests")).unwrap_err()
+    };
+    assert!(style("[style]\naccent = \"orange\"").contains("style.accent"));
+    assert!(style("[style]\naccent = \"#f59e0\"").contains("not a color"));
+    assert!(style("[style.light]\nband = \"#gggggg\"").contains("style.light.band"));
+    assert!(style("[style]\nspotlight_dim = 1.5").contains("spotlight_dim must be from 0 to 1"));
+    assert!(style("[style]\ntext_size = 4").contains("text_size must be from 8 to 72"));
+    assert!(style("[style]\nfont = \"Comic\"").contains("unknown field"));
+    assert!(error(r##"{ highlight = "Go", color = "red" }"##).contains("color:"));
+    assert!(error(r##"{ click = "Go", color = "#ff0000" }"##).contains("`color` only applies"));
 }

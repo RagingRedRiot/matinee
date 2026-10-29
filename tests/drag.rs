@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! Drag steps against a small GTK 4 window that the story compiles in its
 //! session. Ignored by default: they need a C compiler and GTK 4 headers.
 //! Run them with `cargo test -- --ignored`.

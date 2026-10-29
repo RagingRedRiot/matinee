@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! The terminal pane, through `matinee run`. These start a real session,
 //! with bash, dbus-daemon, and the AT-SPI registry from the host.
 

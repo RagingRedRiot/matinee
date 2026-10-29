@@ -128,7 +128,9 @@ A `highlight` step marks part of the screen until the scene ends or a
 `style = "box"`, the default, outlines the mark; `"spotlight"` also dims the
 rest of the frame. `label` adds a callout beside the mark, or below or above
 it when the frame has no room beside. `number` adds a numbered marker, for a
-sequence of steps. The camera frames the mark, the step waits up to its
+sequence of steps. `color = "#dc2626"` draws this mark in its own color in
+place of the style's accent, such as red for a problem and green for a good
+result. The camera frames the mark, the step waits up to its
 `timeout` (5 seconds by default) for the mark to show, and the mark shows for
 a moment before the step's `hold` starts.
 
@@ -136,6 +138,32 @@ a moment before the step's `hold` starts.
 step, after its hold, named `<output>-<theme>-01.png` and on, with the caption
 and highlights fully shown. Stills suit instructions and docs that walk
 through a screen one part at a time.
+
+`[style]` sets how captions, key badges, highlights, and click ripples look,
+for every theme, and `[style.light]` and `[style.dark]` override any of its
+keys for one theme, since a color that reads on a dark recording often does
+not on a light one. Every key is optional; one left out keeps its default.
+
+```toml
+[style]
+accent = "#2563eb"           # highlights, their labels, and numbers
+ripple = "#3b82f6"           # click ripples
+spotlight_dim = 0.55         # how dark a spotlight makes the rest, 0 to 1
+caption_text = "#0f172a"     # caption and badge text
+caption_backing = "#ffffff"  # behind captions and badges over the frame
+caption_border = "#cbd5e1"
+band = "#f8fafc"             # a caption band's background
+text_size = 18               # caption and label text, in points, 8 to 72
+
+[style.dark]
+accent = "#60a5fa"
+caption_text = "#f8fafc"
+caption_backing = "#1e293b"
+```
+
+Colors are `#rrggbb`. Text on a highlight's label or number is dark or white,
+whichever reads on its color. Without `text_size`, text is sized from the
+frame's width; captions do not wrap, so check that long ones still fit.
 
 ## Camera and output
 

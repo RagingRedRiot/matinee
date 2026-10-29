@@ -311,6 +311,7 @@ impl<'r, 'b> Runner<'r, 'b> {
                     highlight.style,
                     highlight.label.as_deref(),
                     highlight.number,
+                    highlight.color,
                 );
                 self.session.run_for(MARK_IN).map_err(io)?;
             }

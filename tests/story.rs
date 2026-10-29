@@ -1,5 +1,5 @@
 use matinee::story::{
-    Action, CameraMove, CaptionPosition, Highlight, HighlightStyle, Mark, Story, Theme,
+    Action, CameraMove, CaptionPosition, Highlight, HighlightStyle, Look, Mark, Story, Theme,
     parse_duration,
 };
 use std::{path::PathBuf, time::Duration};
@@ -449,10 +449,10 @@ fn a_caption_position_needs_a_caption() {
 #[test]
 fn highlights_name_what_they_mark_and_how() {
     let story = parse(
-        r#"{ highlight = "Total", role = "label", label = "The result", number = 2 },
+        r##"{ highlight = "Total", role = "label", label = "The result", number = 2, color = "#22c55e" },
            { highlight = { from = "== Summary", to = "Total" }, style = "spotlight" },
            { highlight_at = [10, 20, 30, 40], window = "Main" },
-           { clear = "highlights" }"#,
+           { clear = "highlights" }"##,
     )
     .unwrap();
     let steps: Vec<&Action> = story.steps().map(|s| &s.action).collect();
@@ -461,6 +461,7 @@ fn highlights_name_what_they_mark_and_how() {
         style: HighlightStyle::Box,
         label: Some(label),
         number: Some(2),
+        color: Some(0x22c55e),
     }) = steps[0]
     else {
         panic!("expected a named highlight: {:?}", steps[0]);
@@ -505,4 +506,49 @@ fn plain_highlights_of_text_need_no_app() {
                      [[scene]]\nsteps = [{ run = \"echo hi\" }, { highlight = \"hi\", role = \"label\" }]\n";
     let e = Story::parse(qualified, PathBuf::from("tests")).unwrap_err();
     assert!(e.contains("launches none"), "{e}");
+}
+
+#[test]
+fn style_sets_overlay_colors_for_every_theme_and_each_one() {
+    let text = format!(
+        "{HEAD}\n[style]\naccent = \"#2563eb\"\ntext_size = 20\n\
+         [style.dark]\naccent = \"#60a5fa\"\ncaption_backing = \"#000000\"\n\
+         [[scene]]\nsteps = [{{ hold = \"1s\" }}]\n"
+    );
+    let story = Story::parse(&text, PathBuf::from("tests")).unwrap();
+    let light = story.style.look(Theme::Light);
+    let dark = story.style.look(Theme::Dark);
+    assert_eq!((light.accent, dark.accent), (0x2563eb, 0x60a5fa));
+    assert_eq!((light.text_size, dark.text_size), (Some(20.0), Some(20.0)));
+    assert_eq!(dark.caption_backing, 0x000000);
+    // What the story leaves alone keeps each theme's default.
+    assert_eq!(
+        light.caption_backing,
+        Look::default_for(Theme::Light).caption_backing
+    );
+    assert_eq!(light.ripple, Look::default_for(Theme::Light).ripple);
+}
+
+#[test]
+fn without_a_style_overlays_look_as_they_always_have() {
+    let story = parse(r#"{ hold = "1s" }"#).unwrap();
+    for theme in [Theme::Light, Theme::Dark] {
+        assert_eq!(story.style.look(theme), &Look::default_for(theme));
+    }
+}
+
+#[test]
+fn style_mistakes_are_named() {
+    let style = |table: &str| {
+        let text = format!("{HEAD}\n{table}\n[[scene]]\nsteps = [{{ hold = \"1s\" }}]\n");
+        Story::parse(&text, PathBuf::from("tests")).unwrap_err()
+    };
+    assert!(style("[style]\naccent = \"orange\"").contains("style.accent"));
+    assert!(style("[style]\naccent = \"#f59e0\"").contains("not a color"));
+    assert!(style("[style.light]\nband = \"#gggggg\"").contains("style.light.band"));
+    assert!(style("[style]\nspotlight_dim = 1.5").contains("spotlight_dim must be from 0 to 1"));
+    assert!(style("[style]\ntext_size = 4").contains("text_size must be from 8 to 72"));
+    assert!(style("[style]\nfont = \"Comic\"").contains("unknown field"));
+    assert!(error(r##"{ highlight = "Go", color = "red" }"##).contains("color:"));
+    assert!(error(r##"{ click = "Go", color = "#ff0000" }"##).contains("`color` only applies"));
 }

@@ -27,7 +27,67 @@ pub struct Story {
     pub terminal: TerminalPane,
     /// Where captions go, unless a scene says otherwise.
     pub captions: CaptionPosition,
+    /// How overlays look, in each theme.
+    pub style: Style,
     pub scenes: Vec<Scene>,
+}
+
+/// The colors and text size of captions, badges, highlights, and click
+/// ripples, for each theme.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Style {
+    pub light: Look,
+    pub dark: Look,
+}
+
+impl Style {
+    /// How overlays look in `theme`.
+    pub fn look(&self, theme: Theme) -> &Look {
+        match theme {
+            Theme::Light => &self.light,
+            Theme::Dark => &self.dark,
+        }
+    }
+}
+
+/// How overlays look in one theme. Colors are `0xRRGGBB`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Look {
+    /// Highlights, their labels, and their numbers.
+    pub accent: u32,
+    pub ripple: u32,
+    /// How dark a spotlight makes the rest of the frame, from 0 to 1.
+    pub spotlight_dim: f64,
+    pub caption_text: u32,
+    /// The backing of a caption or key badge over the frame, and its
+    /// border.
+    pub caption_backing: u32,
+    pub caption_border: u32,
+    /// A caption band's background.
+    pub band: u32,
+    /// Caption and label text size in points; `None` sizes it from the
+    /// frame's width.
+    pub text_size: Option<f32>,
+}
+
+impl Look {
+    /// How overlays look in `theme` unless a storyboard says otherwise.
+    pub fn default_for(theme: Theme) -> Look {
+        let common = |caption_text, caption_backing, caption_border, band| Look {
+            accent: 0xf59e0b,
+            ripple: 0x3b82f6,
+            spotlight_dim: 0.55,
+            caption_text,
+            caption_backing,
+            caption_border,
+            band,
+            text_size: None,
+        };
+        match theme {
+            Theme::Light => common(0x0f172a, 0xffffff, 0xcbd5e1, 0xf8fafc),
+            Theme::Dark => common(0xf8fafc, 0x1e293b, 0x475569, 0x0b1120),
+        }
+    }
 }
 
 /// Where a caption goes: over the frame at its bottom or top, over the
@@ -336,6 +396,8 @@ pub struct Highlight {
     pub label: Option<String>,
     /// A numbered marker on the mark's corner, for a sequence of steps.
     pub number: Option<u32>,
+    /// The mark's color, `0xRRGGBB`, in place of the style's accent.
+    pub color: Option<u32>,
 }
 
 /// What a highlight marks.
@@ -500,8 +562,110 @@ struct RawStory {
     session: Option<RawSession>,
     terminal: Option<RawTerminal>,
     captions: Option<RawCaptions>,
+    style: Option<RawStyle>,
     #[serde(default)]
     scene: Vec<RawScene>,
+}
+
+/// `[style]`: keys for every theme, and `light` and `dark` tables of the
+/// same keys for one.
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawStyle {
+    accent: Option<String>,
+    ripple: Option<String>,
+    spotlight_dim: Option<f64>,
+    caption_text: Option<String>,
+    caption_backing: Option<String>,
+    caption_border: Option<String>,
+    band: Option<String>,
+    text_size: Option<f32>,
+    light: Option<RawLook>,
+    dark: Option<RawLook>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawLook {
+    accent: Option<String>,
+    ripple: Option<String>,
+    spotlight_dim: Option<f64>,
+    caption_text: Option<String>,
+    caption_backing: Option<String>,
+    caption_border: Option<String>,
+    band: Option<String>,
+    text_size: Option<f32>,
+}
+
+impl RawStyle {
+    fn check(self) -> Result<Style, String> {
+        let base = RawLook {
+            accent: self.accent,
+            ripple: self.ripple,
+            spotlight_dim: self.spotlight_dim,
+            caption_text: self.caption_text,
+            caption_backing: self.caption_backing,
+            caption_border: self.caption_border,
+            band: self.band,
+            text_size: self.text_size,
+        };
+        let light = base.with(self.light.unwrap_or_default(), Theme::Light, "style.light")?;
+        let dark = base.with(self.dark.unwrap_or_default(), Theme::Dark, "style.dark")?;
+        Ok(Style { light, dark })
+    }
+}
+
+impl RawLook {
+    /// `theme`'s look: its defaults, then these keys, then `over`'s, which
+    /// are reported as `table` when wrong.
+    fn with(&self, over: RawLook, theme: Theme, table: &str) -> Result<Look, String> {
+        let mut look = Look::default_for(theme);
+        for (keys, table) in [(self, "style"), (&over, table)] {
+            for (name, value, field) in [
+                ("accent", &keys.accent, &mut look.accent),
+                ("ripple", &keys.ripple, &mut look.ripple),
+                ("caption_text", &keys.caption_text, &mut look.caption_text),
+                (
+                    "caption_backing",
+                    &keys.caption_backing,
+                    &mut look.caption_backing,
+                ),
+                (
+                    "caption_border",
+                    &keys.caption_border,
+                    &mut look.caption_border,
+                ),
+                ("band", &keys.band, &mut look.band),
+            ] {
+                if let Some(text) = value {
+                    *field = parse_color(text).map_err(|e| format!("{table}.{name}: {e}"))?;
+                }
+            }
+            if let Some(dim) = keys.spotlight_dim {
+                if !(0.0..=1.0).contains(&dim) {
+                    return Err(format!("{table}.spotlight_dim must be from 0 to 1"));
+                }
+                look.spotlight_dim = dim;
+            }
+            if let Some(size) = keys.text_size {
+                if !(8.0..=72.0).contains(&size) {
+                    return Err(format!("{table}.text_size must be from 8 to 72 points"));
+                }
+                look.text_size = Some(size);
+            }
+        }
+        Ok(look)
+    }
+}
+
+/// A color written `#rrggbb`, as `0xRRGGBB`.
+pub fn parse_color(text: &str) -> Result<u32, String> {
+    let bad = || format!("`{text}` is not a color; write it like `#f59e0b`");
+    let hex = text.strip_prefix('#').ok_or_else(bad)?;
+    if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(bad());
+    }
+    u32::from_str_radix(hex, 16).map_err(|_| bad())
 }
 
 #[derive(Deserialize)]
@@ -615,6 +779,7 @@ struct RawStep {
     style: Option<HighlightStyle>,
     label: Option<String>,
     number: Option<u32>,
+    color: Option<String>,
     clear: Option<String>,
     role: Option<String>,
     within: Option<String>,
@@ -843,6 +1008,7 @@ impl RawStory {
             .captions
             .and_then(|c| c.position)
             .unwrap_or(CaptionPosition::Bottom);
+        let style = self.style.unwrap_or_default().check()?;
         Ok(Story {
             dir,
             demo,
@@ -852,6 +1018,7 @@ impl RawStory {
             session,
             terminal,
             captions,
+            style,
             scenes,
         })
     }
@@ -930,11 +1097,17 @@ impl RawStep {
         if self.number == Some(0) {
             return Err("`number` counts from 1".into());
         }
+        let color = self
+            .color
+            .take()
+            .map(|c| parse_color(&c).map_err(|e| format!("color: {e}")))
+            .transpose()?;
         Ok(Action::Highlight(Highlight {
             mark,
             style: self.style.take().unwrap_or_default(),
             label: self.label.take(),
             number: self.number.take(),
+            color,
         }))
     }
 
@@ -996,6 +1169,7 @@ impl RawStep {
         only_with("style", self.style.is_some(), &marks)?;
         only_with("label", self.label.is_some(), &marks)?;
         only_with("number", self.number.is_some(), &marks)?;
+        only_with("color", self.color.is_some(), &marks)?;
         let at = ["hover_at", "click_at", "drag_from", "highlight_at"];
         let targeted = [
             "wait_for",

@@ -9,7 +9,7 @@ use crate::{
     frame::Frame,
     platform::{A11y, Boundary, Button, Child, Display, Window},
     record::Recording,
-    story::{CameraMode, CaptionPosition, HighlightStyle, PanePosition, Story, Theme},
+    story::{CameraMode, CaptionPosition, HighlightStyle, Look, PanePosition, Story, Theme},
     terminal::{Pane, Terminal},
 };
 use std::{
@@ -42,9 +42,10 @@ pub struct Session<'a> {
     oversized: Vec<String>,
     /// How far recordings' lossy compression may move a color.
     lossy: u8,
-    /// The theme being recorded, and whether captions need a band above
-    /// the frame and below it.
+    /// The theme being recorded, how overlays look in it, and whether
+    /// captions need a band above the frame and below it.
     theme: Theme,
+    look: Look,
     bands: (bool, bool),
     artifacts: bool,
     /// What recordings show of the screen.
@@ -100,6 +101,7 @@ impl<'a> Session<'a> {
             oversized: vec![],
             lossy: story.demo.lossy,
             theme,
+            look: story.style.look(theme).clone(),
             bands: story.caption_bands(),
             artifacts: false,
             camera: Camera::new(
@@ -416,13 +418,14 @@ impl<'a> Session<'a> {
     pub fn start_recording(&mut self, fixed_too: bool) {
         let (size, scale, pane, lossy) = (self.size, self.scale, self.pane_rect(), self.lossy);
         let (theme, (above, below)) = (self.theme, self.bands);
+        let look = &self.look;
         let new = || {
             let (w, h) = (size[0] as usize, size[1] as usize);
-            let mut recording = Recording::new(w, h, scale as usize, theme);
+            let mut recording = Recording::new(w, h, scale as usize, theme, look);
             recording.set_pane(pane);
             recording.set_lossy(lossy);
             if above || below {
-                recording.set_bands(above, below, theme);
+                recording.set_bands(above, below);
             }
             recording
         };
@@ -454,9 +457,10 @@ impl<'a> Session<'a> {
         style: HighlightStyle,
         label: Option<&str>,
         number: Option<u32>,
+        color: Option<u32>,
     ) {
         self.recordings()
-            .for_each(|r| r.highlight(rect, style, label, number));
+            .for_each(|r| r.highlight(rect, style, label, number, color));
     }
 
     /// Take down every highlight in what is recorded from now on.

@@ -17,7 +17,7 @@ use crate::{
     lzw,
     overlay::{self, Events, Layout, Painter, Shown},
     palette::{self, Histogram, Nearest},
-    story::{CaptionPosition, HighlightStyle, Theme},
+    story::{CaptionPosition, HighlightStyle, Look, Theme},
 };
 use std::{
     borrow::Cow,
@@ -85,6 +85,9 @@ pub struct Recording {
     segments: Vec<(usize, String)>,
     /// Ticks to save as still pictures.
     stills: Vec<usize>,
+    /// The theme being recorded, and how overlays look in it.
+    theme: Theme,
+    look: Look,
     painter: Painter,
 }
 
@@ -143,8 +146,8 @@ impl<W: Write> Write for Counting<W> {
 
 impl Recording {
     /// A recording of an output `scale` times larger than `width` by
-    /// `height`, in `theme`.
-    pub fn new(width: usize, height: usize, scale: usize, theme: Theme) -> Recording {
+    /// `height`, in `theme`, with overlays as `look` says.
+    pub fn new(width: usize, height: usize, scale: usize, theme: Theme, look: &Look) -> Recording {
         Recording {
             scale,
             width,
@@ -161,18 +164,20 @@ impl Recording {
             lossy: LOSSY,
             segments: vec![(0, "start".into())],
             stills: vec![],
-            painter: Painter::new(width, height, theme),
+            theme,
+            look: look.clone(),
+            painter: Painter::new(width, height, theme, look),
         }
     }
 
     /// Add a caption band above the frame, below it, or both, which makes
     /// the output taller. Call before the first tick.
-    pub fn set_bands(&mut self, above: bool, below: bool, theme: Theme) {
-        let band = Painter::band_height(self.width);
+    pub fn set_bands(&mut self, above: bool, below: bool) {
+        let band = Painter::band_height(self.width, &self.look);
         self.band_above = if above { band } else { 0 };
         self.band_below = if below { band } else { 0 };
         self.height = self.frame_height + self.band_above + self.band_below;
-        self.painter = Painter::new(self.width, self.height, theme);
+        self.painter = Painter::new(self.width, self.height, self.theme, &self.look);
     }
 
     /// Let lossy compression move a color by up to `tolerance` in any
@@ -205,9 +210,10 @@ impl Recording {
         style: HighlightStyle,
         label: Option<&str>,
         number: Option<u32>,
+        color: Option<u32>,
     ) {
         self.events
-            .highlight(self.ticks.len(), rect, style, label, number);
+            .highlight(self.ticks.len(), rect, style, label, number, color);
     }
 
     /// Take down every highlight from the next tick on.
@@ -784,7 +790,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("matinee-gif-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("t.gif");
-        let mut rec = Recording::new(20, 20, 1, crate::story::Theme::Light);
+        let mut rec = Recording::new(
+            20,
+            20,
+            1,
+            crate::story::Theme::Light,
+            &Look::default_for(crate::story::Theme::Light),
+        );
         // 15 ticks of one image, then 15 of another: one second at 15 fps
         // is 100 centiseconds each.
         for _ in 0..15 {
@@ -818,7 +830,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("matinee-gifq-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("t.gif");
-        let mut rec = Recording::new(20, 20, 1, crate::story::Theme::Light);
+        let mut rec = Recording::new(
+            20,
+            20,
+            1,
+            crate::story::Theme::Light,
+            &Look::default_for(crate::story::Theme::Light),
+        );
         // A second each: the pointer moves but stays off screen, so the
         // first two seconds look the same; then the image changes.
         for (color, pointer) in [
@@ -844,7 +862,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("t.gif");
         let (dark, light) = (0xff203040u32, 0xffffffffu32);
-        let mut rec = Recording::new(20, 20, 1, crate::story::Theme::Light);
+        let mut rec = Recording::new(
+            20,
+            20,
+            1,
+            crate::story::Theme::Light,
+            &Look::default_for(crate::story::Theme::Light),
+        );
         let mut images = vec![frame(20, 20, dark)];
         // Two opposite corners change, so the rectangle covers everything
         // between them.
@@ -900,7 +924,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("matinee-gifs-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("t.gif");
-        let mut rec = Recording::new(20, 20, 1, crate::story::Theme::Light);
+        let mut rec = Recording::new(
+            20,
+            20,
+            1,
+            crate::story::Theme::Light,
+            &Look::default_for(crate::story::Theme::Light),
+        );
         rec.add(&frame(20, 20, 0xff102030), all(), None);
         rec.segment("scene 1");
         for _ in 0..15 {
@@ -933,9 +963,15 @@ mod tests {
 
     #[test]
     fn a_caption_band_makes_the_output_taller_and_moves_the_pointer() {
-        let mut rec = Recording::new(20, 20, 1, crate::story::Theme::Dark);
-        rec.set_bands(false, true, crate::story::Theme::Dark);
-        let band = Painter::band_height(20);
+        let mut rec = Recording::new(
+            20,
+            20,
+            1,
+            crate::story::Theme::Dark,
+            &Look::default_for(crate::story::Theme::Dark),
+        );
+        rec.set_bands(false, true);
+        let band = Painter::band_height(20, &Look::default_for(crate::story::Theme::Dark));
         assert_eq!(rec.height, 20 + band);
         rec.add(&frame(20, 20, 0xff102030), all(), Some((5.0, 6.0)));
         let image = &rec.images[0];
@@ -944,8 +980,14 @@ mod tests {
         assert_ne!(image[(20 + band - 2) * 20], 0x102030, "the band is below");
         assert_eq!(rec.ticks[0].1, Some((5, 6)));
 
-        let mut above = Recording::new(20, 20, 1, crate::story::Theme::Dark);
-        above.set_bands(true, false, crate::story::Theme::Dark);
+        let mut above = Recording::new(
+            20,
+            20,
+            1,
+            crate::story::Theme::Dark,
+            &Look::default_for(crate::story::Theme::Dark),
+        );
+        above.set_bands(true, false);
         above.add(&frame(20, 20, 0xff102030), all(), Some((5.0, 6.0)));
         assert_eq!(above.ticks[0].1, Some((5, 6 + band as i32)));
         assert_eq!(
@@ -957,11 +999,18 @@ mod tests {
 
     #[test]
     fn stills_are_whole_outputs_with_their_highlights() {
-        let mut rec = Recording::new(20, 20, 1, crate::story::Theme::Light);
+        let mut rec = Recording::new(
+            20,
+            20,
+            1,
+            crate::story::Theme::Light,
+            &Look::default_for(crate::story::Theme::Light),
+        );
         rec.add(&frame(20, 20, 0xffffffff), all(), None);
         rec.highlight(
             Rect::new(4.0, 4.0, 12.0, 12.0),
             HighlightStyle::Spotlight,
+            None,
             None,
             None,
         );

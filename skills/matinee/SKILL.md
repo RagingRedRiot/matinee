@@ -108,6 +108,17 @@ wait_for = "="                  # an accessible name that shows the app is ready
 [captions]                      # optional
 # position = "bottom"           # "top", "auto", or a band: "below", "above"
 
+[style]                         # optional; each key defaults to today's look
+# accent = "#f59e0b"            # highlights, their labels, and numbers
+# ripple = "#3b82f6"            # click ripples
+# spotlight_dim = 0.55          # 0 to 1
+# caption_text = "#0f172a"
+# caption_backing = "#ffffff"
+# caption_border = "#cbd5e1"
+# band = "#f8fafc"              # a caption band's background
+# text_size = 18                # points, 8-72; default from the frame's width
+# [style.dark]                  # and [style.light]: the same keys, for one theme
+
 [[scene]]
 caption = "Add two numbers"     # optional, shown during the scene
 # caption_position = "top"      # this scene's, in place of [captions]
@@ -178,8 +189,9 @@ are cleared. A plain name marks the latest such text in the terminal pane,
 then in an app's text (Windows console windows; not on Linux yet), then a
 control with that name; selectors narrow it to a control. `{ from, to }`
 marks a section of lines, and `highlight_at = [x, y, w, h]` a rectangle in a
-window. `style` is `box` or `spotlight`; `label` adds a callout and `number`
-a numbered marker. The camera frames each mark. Highlight what a reader
+window. `style` is `box` or `spotlight`; `label` adds a callout, `number` a
+numbered marker, and `color = "#dc2626"` its own color in place of the
+style's accent. The camera frames each mark. Highlight what a reader
 should look at, in the order they should read it. For docs that walk through
 a screen, record with `--stills` to get a PNG after each highlight.
 

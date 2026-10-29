@@ -10,7 +10,7 @@
 
 use crate::{
     camera::Rect,
-    story::{CaptionPosition, HighlightStyle, Theme},
+    story::{CaptionPosition, HighlightStyle, Look, Theme},
 };
 use std::{cell::RefCell, collections::HashMap};
 
@@ -26,50 +26,38 @@ const BADGE_FADE: f64 = 0.25;
 /// Opacity steps in a fade. Fewer steps keep more ticks the same.
 const LEVELS: u8 = 8;
 
-const RIPPLE_COLOR: u32 = 0x3b82f6;
-/// Highlights, their numbers, and their labels.
-const ACCENT: u32 = 0xf59e0b;
-/// Text on the accent color.
-const ON_ACCENT: u32 = 0x111827;
-/// How much a spotlight darkens the rest of the frame.
-const DIM: f64 = 0.55;
+/// Text on a light color, and on a dark one.
+const DARK_TEXT: u32 = 0x111827;
+const LIGHT_TEXT: u32 = 0xffffff;
 
-/// The colors of captions and badges in one theme.
+/// What a theme fixes beside the story's style: the line between a caption
+/// band and the frame, and how solid a caption's backing is.
 #[derive(Debug, Clone, Copy)]
-struct Palette {
-    /// A caption band's background, and the line between it and the frame.
-    band: u32,
+struct Fixed {
     band_rule: u32,
-    /// Text on the band, or on a caption over the frame.
-    text: u32,
-    /// The backing of a caption or badge over the frame, its opacity, and
-    /// its border.
-    backing: u32,
     backing_alpha: f64,
-    border: u32,
 }
 
-impl Palette {
-    fn of(theme: Theme) -> Palette {
+impl Fixed {
+    fn of(theme: Theme) -> Fixed {
         match theme {
-            Theme::Dark => Palette {
-                band: 0x0b1120,
+            Theme::Dark => Fixed {
                 band_rule: 0x1e293b,
-                text: 0xf8fafc,
-                backing: 0x1e293b,
                 backing_alpha: 0.95,
-                border: 0x475569,
             },
-            Theme::Light => Palette {
-                band: 0xf8fafc,
+            Theme::Light => Fixed {
                 band_rule: 0xe2e8f0,
-                text: 0x0f172a,
-                backing: 0xffffff,
                 backing_alpha: 0.96,
-                border: 0xcbd5e1,
             },
         }
     }
+}
+
+/// Text that reads on `color`: dark on a light color, white on a dark one.
+fn text_on(color: u32) -> u32 {
+    let channel = |shift: u32| ((color >> shift) & 0xff) as f64;
+    let luma = 0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0);
+    if luma > 150.0 { DARK_TEXT } else { LIGHT_TEXT }
 }
 
 /// Where a caption is drawn on a tick: over the frame, or in a band.
@@ -89,6 +77,8 @@ struct Mark {
     style: HighlightStyle,
     label: Option<String>,
     number: Option<u32>,
+    /// The mark's color in place of the style's accent.
+    color: Option<u32>,
     start: usize,
     end: Option<usize>,
 }
@@ -179,12 +169,14 @@ impl Events {
         style: HighlightStyle,
         label: Option<&str>,
         number: Option<u32>,
+        color: Option<u32>,
     ) {
         self.marks.push(Mark {
             rect,
             style,
             label: label.map(str::to_string),
             number,
+            color,
             start: tick,
             end: None,
         });
@@ -390,33 +382,37 @@ pub struct Painter {
     height: usize,
     /// Text size in output pixels.
     size: f32,
-    palette: Palette,
+    look: Look,
+    fixed: Fixed,
     glyphs: RefCell<HashMap<(char, u32), Glyph>>,
 }
 
 impl Painter {
-    /// A painter for a `width` by `height` output in `theme`, with text
-    /// sized for a frame `width` wide.
-    pub fn new(width: usize, height: usize, theme: Theme) -> Painter {
+    /// A painter for a `width` by `height` output in `theme`, looking as
+    /// `look` says, with text sized by it or else for a frame `width` wide.
+    pub fn new(width: usize, height: usize, theme: Theme, look: &Look) -> Painter {
         Painter {
             font: fontdue::Font::from_bytes(FONT, fontdue::FontSettings::default())
                 .expect("the embedded font is valid"),
             width,
             height,
-            size: Painter::text_size(width),
-            palette: Palette::of(theme),
+            size: Painter::text_size(width, look),
+            look: look.clone(),
+            fixed: Fixed::of(theme),
             glyphs: RefCell::new(HashMap::new()),
         }
     }
 
-    /// The text size for an output `width` wide.
-    fn text_size(width: usize) -> f32 {
-        (width as f32 * 0.021).clamp(14.0, 24.0)
+    /// The text size for an output `width` wide: the style's, in points,
+    /// which is output pixels, or else one that suits the width.
+    fn text_size(width: usize, look: &Look) -> f32 {
+        look.text_size
+            .unwrap_or((width as f32 * 0.021).clamp(14.0, 24.0))
     }
 
-    /// How tall a caption band is for an output `width` wide.
-    pub fn band_height(width: usize) -> usize {
-        (Painter::text_size(width) * 2.6).round() as usize
+    /// How tall a caption band is for an output `width` wide in `look`.
+    pub fn band_height(width: usize, look: &Look) -> usize {
+        (Painter::text_size(width, look) * 2.6).round() as usize
     }
 
     /// Fill a caption band's background, `top` rows down for `height` rows,
@@ -430,9 +426,9 @@ impl Painter {
                 y + 1 == top + height
             };
             let color = if rule {
-                self.palette.band_rule
+                self.fixed.band_rule
             } else {
-                self.palette.band
+                self.look.band
             };
             pixels[y * self.width..(y + 1) * self.width].fill(color);
         }
@@ -463,7 +459,7 @@ impl Painter {
             match place {
                 Place::Below | Place::Above => {
                     // A subtitle in its band: plain text, centered.
-                    let band = Painter::band_height(self.width) as i32;
+                    let band = Painter::band_height(self.width, &self.look) as i32;
                     let top = if place == Place::Below {
                         fy + fh
                     } else {
@@ -471,7 +467,14 @@ impl Painter {
                     };
                     let x = fx + (fw - w) / 2;
                     let y = top + (band - h) / 2;
-                    self.text(pixels, (x, y, w, h), text, size, self.palette.text, opacity);
+                    self.text(
+                        pixels,
+                        (x, y, w, h),
+                        text,
+                        size,
+                        self.look.caption_text,
+                        opacity,
+                    );
                     drawn.add(x, y, w, h);
                 }
                 Place::Bottom | Place::Top => {
@@ -484,12 +487,19 @@ impl Painter {
                     let plate = Plate {
                         rect: (x, y, w, h),
                         radius: h as f64 * 0.32,
-                        fill: self.palette.backing,
-                        fill_alpha: self.palette.backing_alpha,
-                        border: Some(self.palette.border),
+                        fill: self.look.caption_backing,
+                        fill_alpha: self.fixed.backing_alpha,
+                        border: Some(self.look.caption_border),
                     };
                     self.plate(pixels, &plate, opacity);
-                    self.text(pixels, (x, y, w, h), text, size, self.palette.text, opacity);
+                    self.text(
+                        pixels,
+                        (x, y, w, h),
+                        text,
+                        size,
+                        self.look.caption_text,
+                        opacity,
+                    );
                     drawn.add(x, y, w, h);
                     caption_box = Some((x, y, w, h));
                 }
@@ -511,12 +521,19 @@ impl Painter {
             let plate = Plate {
                 rect: (x, y, w, h),
                 radius: size as f64 * 0.35,
-                fill: self.palette.backing,
-                fill_alpha: self.palette.backing_alpha,
-                border: Some(self.palette.border),
+                fill: self.look.caption_backing,
+                fill_alpha: self.fixed.backing_alpha,
+                border: Some(self.look.caption_border),
             };
             self.plate(pixels, &plate, opacity);
-            self.text(pixels, (x, y, w, h), text, size, self.palette.text, opacity);
+            self.text(
+                pixels,
+                (x, y, w, h),
+                text,
+                size,
+                self.look.caption_text,
+                opacity,
+            );
             drawn.add(x, y, w, h);
         }
         if let Some((cx, cy, step)) = shown.ripple {
@@ -532,7 +549,7 @@ impl Painter {
                     let d =
                         (((x - cx) as f64 + 0.5).powi(2) + ((y - cy) as f64 + 0.5).powi(2)).sqrt();
                     let cover = (thickness / 2.0 + 0.5 - (d - radius).abs()).clamp(0.0, 1.0);
-                    self.blend(pixels, x, y, RIPPLE_COLOR, cover * opacity);
+                    self.blend(pixels, x, y, self.look.ripple, cover * opacity);
                 }
             }
             drawn.add(cx - reach, cy - reach, 2 * reach + 1, 2 * reach + 1);
@@ -563,7 +580,13 @@ impl Painter {
                         .iter()
                         .map(|(r, _)| rounded_cover(*r, radius, x, y))
                         .fold(0.0, f64::max);
-                    self.blend(pixels, x, y, 0x000000, DIM * opacity * (1.0 - inside));
+                    self.blend(
+                        pixels,
+                        x,
+                        y,
+                        0x000000,
+                        self.look.spotlight_dim * opacity * (1.0 - inside),
+                    );
                 }
             }
             drawn.add(fx, fy, fw, fh);
@@ -573,11 +596,13 @@ impl Painter {
         for &(i, rect, level) in &shown.marks {
             let mark = &events.marks[i];
             let opacity = level as f64 / LEVELS as f64;
+            let accent = mark.color.unwrap_or(self.look.accent);
+            let on_accent = text_on(accent);
             let (x, y, w, h) = padded(rect);
             let outline = Plate {
                 rect: (x, y, w, h),
                 radius,
-                fill: ACCENT,
+                fill: accent,
                 fill_alpha: if mark.style == HighlightStyle::Box {
                     0.10
                 } else {
@@ -586,7 +611,7 @@ impl Painter {
                 border: None,
             };
             self.plate(pixels, &outline, opacity);
-            self.ring(pixels, (x, y, w, h), radius, stroke, ACCENT, opacity);
+            self.ring(pixels, (x, y, w, h), radius, stroke, accent, opacity);
             drawn.add(x - 2, y - 2, w + 4, h + 4);
 
             // A number goes left of the mark, at its middle, or right of it
@@ -606,7 +631,7 @@ impl Painter {
                 let disc = Plate {
                     rect: (cx - r, cy - r, 2 * r, 2 * r),
                     radius: r as f64,
-                    fill: ACCENT,
+                    fill: accent,
                     fill_alpha: 1.0,
                     border: None,
                 };
@@ -617,7 +642,7 @@ impl Painter {
                     (cx - r, cy - r, 2 * r, 2 * r),
                     &n.to_string(),
                     size,
-                    ON_ACCENT,
+                    on_accent,
                     opacity,
                 );
                 drawn.add(cx - r, cy - r, 2 * r, 2 * r);
@@ -639,12 +664,12 @@ impl Painter {
                 let plate = Plate {
                     rect: (lx, ly, lw, lh),
                     radius: lh as f64 * 0.3,
-                    fill: ACCENT,
+                    fill: accent,
                     fill_alpha: 1.0,
                     border: None,
                 };
                 self.plate(pixels, &plate, opacity);
-                self.text(pixels, (lx, ly, lw, lh), label, size, ON_ACCENT, opacity);
+                self.text(pixels, (lx, ly, lw, lh), label, size, on_accent, opacity);
                 drawn.add(lx, ly, lw, lh);
             }
         }
@@ -809,6 +834,13 @@ impl Bounds {
 mod tests {
     use super::*;
 
+    /// The default accent, which highlights are drawn in.
+    const ACCENT: u32 = 0xf59e0b;
+
+    fn painter(w: usize, h: usize, theme: Theme) -> Painter {
+        Painter::new(w, h, theme, &Look::default_for(theme))
+    }
+
     /// A layout with no bands and no pane, where the screen maps to the
     /// output one to one.
     fn whole(w: i32, h: i32) -> impl Fn(&dyn Fn(Layout) -> Shown) -> Shown {
@@ -879,6 +911,7 @@ mod tests {
             HighlightStyle::Box,
             None,
             None,
+            None,
         );
         assert_eq!(place(&events), Some(Place::Top));
         events.clear_highlights(1);
@@ -886,6 +919,7 @@ mod tests {
             2,
             Rect::new(10.0, 10.0, 20.0, 10.0),
             HighlightStyle::Box,
+            None,
             None,
             None,
         );
@@ -899,6 +933,7 @@ mod tests {
             10,
             Rect::new(100.0, 50.0, 40.0, 20.0),
             HighlightStyle::Box,
+            None,
             None,
             None,
         );
@@ -989,7 +1024,7 @@ mod tests {
     fn drawing_marks_only_what_it_covers() {
         let mut events = Events::default();
         events.caption(0, Some("Hi"), CaptionPosition::Bottom);
-        let painter = Painter::new(400, 300, Theme::Dark);
+        let painter = painter(400, 300, Theme::Dark);
         let shown = shown_at(&events, 10, 100, 400, 300);
         let (changed, (x, y, w, h), pixels) = drawn(&painter, &events, &shown, 400, 300);
         assert!(y + h <= 300 && y > 200, "near the bottom: {y}+{h}");
@@ -1006,10 +1041,10 @@ mod tests {
 
     #[test]
     fn a_band_caption_stays_in_its_band() {
-        let band = Painter::band_height(400) as i32;
+        let band = Painter::band_height(400, &Look::default_for(Theme::Light)) as i32;
         let mut events = Events::default();
         events.caption(0, Some("Under the frame"), CaptionPosition::Below);
-        let painter = Painter::new(400, 300 + band as usize, Theme::Light);
+        let painter = painter(400, 300 + band as usize, Theme::Light);
         let map = |r: Rect| (r.x as i32, r.y as i32, r.w as i32, r.h as i32);
         let layout = Layout {
             frame: (0, 0, 400, 300),
@@ -1034,8 +1069,9 @@ mod tests {
             HighlightStyle::Spotlight,
             None,
             None,
+            None,
         );
-        let painter = Painter::new(400, 300, Theme::Dark);
+        let painter = painter(400, 300, Theme::Dark);
         let shown = shown_at(&events, 10, 100, 400, 300);
         let (_, _, pixels) = drawn(&painter, &events, &shown, 400, 300);
         assert!(pixels[10 * 400 + 10] & 0xff < 0xa0, "the corner is dimmed");
@@ -1048,13 +1084,14 @@ mod tests {
 
     #[test]
     fn a_label_goes_beside_its_mark() {
-        let painter = Painter::new(400, 300, Theme::Dark);
+        let painter = painter(400, 300, Theme::Dark);
         let mut events = Events::default();
         events.highlight(
             0,
             Rect::new(20.0, 100.0, 100.0, 20.0),
             HighlightStyle::Box,
             Some("Here"),
+            None,
             None,
         );
         let shown = shown_at(&events, 10, 100, 400, 300);
@@ -1066,7 +1103,7 @@ mod tests {
 
     #[test]
     fn a_number_goes_right_of_a_mark_at_the_frame_s_left_edge() {
-        let painter = Painter::new(400, 300, Theme::Dark);
+        let painter = painter(400, 300, Theme::Dark);
         let mut events = Events::default();
         events.highlight(
             0,
@@ -1074,6 +1111,7 @@ mod tests {
             HighlightStyle::Box,
             None,
             Some(1),
+            None,
         );
         let shown = shown_at(&events, 10, 100, 400, 300);
         let (_, _, pixels) = drawn(&painter, &events, &shown, 400, 300);
@@ -1085,7 +1123,7 @@ mod tests {
 
     #[test]
     fn a_wide_mark_s_label_goes_below_or_above_when_there_is_no_room() {
-        let painter = Painter::new(400, 300, Theme::Dark);
+        let painter = painter(400, 300, Theme::Dark);
         let label_rows = |y: f64| {
             let mut events = Events::default();
             events.highlight(
@@ -1093,6 +1131,7 @@ mod tests {
                 Rect::new(150.0, y, 240.0, 20.0),
                 HighlightStyle::Box,
                 Some("Here"),
+                None,
                 None,
             );
             let shown = shown_at(&events, 10, 100, 400, 300);
@@ -1112,5 +1151,39 @@ mod tests {
         let high = label_rows(270.0);
         assert!(high.iter().any(|&r| r < 262), "a label above: {high:?}");
         assert!(high.iter().all(|&r| r < 297), "nothing below: {high:?}");
+    }
+
+    #[test]
+    fn a_highlight_s_own_color_is_used_and_its_text_reads_on_it() {
+        let mut events = Events::default();
+        events.highlight(
+            0,
+            Rect::new(20.0, 100.0, 100.0, 20.0),
+            HighlightStyle::Box,
+            Some("Here"),
+            None,
+            Some(0x1d4ed8),
+        );
+        let shown = shown_at(&events, 10, 100, 400, 300);
+        let (_, _, pixels) = drawn(&painter(400, 300, Theme::Light), &events, &shown, 400, 300);
+        assert!(
+            (130..400).any(|col| pixels[110 * 400 + col] == 0x1d4ed8),
+            "the label in blue"
+        );
+        assert!(!pixels.contains(&ACCENT), "no default accent anywhere");
+        // Dark text on light colors, white on dark ones.
+        assert_eq!(text_on(0xf59e0b), DARK_TEXT);
+        assert_eq!(text_on(0x1d4ed8), LIGHT_TEXT);
+        assert_eq!(text_on(0xffffff), DARK_TEXT);
+        assert_eq!(text_on(0x000000), LIGHT_TEXT);
+    }
+
+    #[test]
+    fn text_size_sets_the_caption_band_s_height() {
+        let mut look = Look::default_for(Theme::Dark);
+        let automatic = Painter::band_height(400, &look);
+        look.text_size = Some(30.0);
+        assert_eq!(Painter::band_height(400, &look), 78);
+        assert_ne!(automatic, 78);
     }
 }

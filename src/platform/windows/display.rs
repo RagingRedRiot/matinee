@@ -14,11 +14,43 @@ use crate::{
     platform::{Button, Window},
     story::{Story, Theme},
 };
-use std::{collections::HashSet, io, time::Duration};
-use windows_sys::Win32::UI::{
-    HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext},
-    WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN},
+use std::{collections::HashSet, io, sync::Once, time::Duration};
+use windows_sys::Win32::{
+    Foundation::POINT,
+    Graphics::Gdi::{MONITOR_DEFAULTTOPRIMARY, MonitorFromPoint},
+    UI::{
+        HiDpi::{
+            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, MDT_EFFECTIVE_DPI,
+            SetProcessDpiAwarenessContext,
+        },
+        WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN},
+    },
 };
+
+/// The scale mismatch is reported once a run, not once a theme.
+static SCALE_WARNING: Once = Once::new();
+
+/// The primary display's scaling, in percent, as Windows applies it now.
+fn display_scale() -> Option<u32> {
+    let (mut x, mut y) = (0u32, 0u32);
+    let monitor = unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) };
+    let ok = unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut x, &mut y) } >= 0;
+    (ok && x > 0).then_some(x * 100 / 96)
+}
+
+/// What to say when the display is scaled to `display` percent but the
+/// story records at `scale`. Apps draw at the display's scaling, while the
+/// story lays their windows out for its own, so they show larger or
+/// smaller than it intends.
+fn scale_warning(display: u32, scale: u32) -> String {
+    let wanted = scale * 100;
+    let size = display * 100 / wanted;
+    format!(
+        "matinee: warning: the display is scaled to {display}%, but the story records at \
+         scale {scale}, for {wanted}%: apps will draw at {size}% of the size the story lays \
+         them out for; set the display's scaling to {wanted}% to match"
+    )
+}
 
 /// The desktop background behind windows, the same gray as on Linux.
 const BACKGROUND: u32 = 0xff80_8c8c;
@@ -67,6 +99,13 @@ impl Display {
         // and UI Automation would disagree about where a window is.
         unsafe {
             SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        }
+        if let Some(display) = display_scale() {
+            let wanted = story.demo.scale * 100;
+            if display != wanted {
+                SCALE_WARNING
+                    .call_once(|| eprintln!("{}", scale_warning(display, story.demo.scale)));
+            }
         }
         let [w, h] = story.demo.size;
         let screen = boundary.is_on_screen();
@@ -357,5 +396,19 @@ impl Display {
     /// Automation.
     pub fn accessibility(&self) -> io::Result<A11y> {
         A11y::connect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scale_warning;
+
+    #[test]
+    fn a_scale_mismatch_says_how_far_apps_are_off_and_what_to_set() {
+        let w = scale_warning(150, 2);
+        assert!(w.contains("scaled to 150%"), "{w}");
+        assert!(w.contains("75% of the size"), "{w}");
+        assert!(w.contains("scaling to 200%"), "{w}");
+        assert!(scale_warning(150, 1).contains("150% of the size"));
     }
 }

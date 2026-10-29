@@ -27,6 +27,11 @@ pub fn parent_of(pid: u32) -> Option<u32> {
         .and_then(|p| p.parse().ok())
 }
 
+/// Whether accessibility trees always report device pixels. AT-SPI
+/// toolkits report points or device pixels, some both, so each tree's
+/// space is worked out from its sizes.
+pub const ACCESSIBILITY_IN_PIXELS: bool = false;
+
 /// The shell `matinee shell` runs by default, and the one seeds use.
 pub const SHELL: &str = "bash";
 /// What the terminal pane's prompt shows before each command.

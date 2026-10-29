@@ -280,7 +280,9 @@ a runtime dependency.
   instead: apps open on the user's screen and take real input through the
   input queue, sent only when it lands on the story's windows, and
   packaged apps start through the shell by app ID. The boundary is a fresh
-  profile, not yet isolation. Still missing on Windows: driving the system
-  theme, so light and dark look alike; and a canvas larger than the app
-  for the zoom camera, so stories record at one pixel per point.
+  profile, not yet isolation. Apps draw at the display's scaling, which
+  matinee does not set, so the story's scale must match it for the
+  zoom camera to show them at the size the story lays them out for, and
+  matinee warns when it does not. Still missing on Windows: driving the
+  system theme, so light and dark look alike.
   [docs/windows.md](docs/windows.md) is the guide.

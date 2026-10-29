@@ -1,14 +1,16 @@
 ---
 name: matinee
-description: Write, check, and record matinee storyboards, scripted demos that matinee performs against a real Linux program and records as light and dark GIFs for a README. Use when the user wants a demo GIF, screencast, or README recording of a terminal tool, a desktop app, or both; when they say "record a demo", "storyboard", "matinee", "re-record the GIF", or "the demo is out of date"; and when a matinee run fails and needs diagnosing. Covers the storyboard TOML, targeting controls by accessible name, terminal staging, the camera, and the check, probe, run, record loop.
+description: Write, check, and record matinee storyboards, scripted demos that matinee performs against a real program on Linux or Windows and records as light and dark GIFs for a README, with captions, highlights, and annotated stills for docs. Use when the user wants a demo GIF, screencast, README recording, or step-by-step screenshots of a terminal tool, a desktop app, or both; when they say "record a demo", "storyboard", "matinee", "re-record the GIF", "highlight", or "the demo is out of date"; and when a matinee run fails and needs diagnosing. Covers the storyboard TOML, targeting controls by accessible name, terminal staging, the camera and zoom, captions and highlights, Windows sessions and --screen, and the check, probe, run, record loop.
 ---
 
 # matinee
 
 matinee performs a storyboard, a TOML file kept beside the project, against
-the real program in a private headless session, checks every step, and writes
-a GIF per theme. This skill is what a session needs to write storyboards and
-drive matinee from the CLI.
+the real program in a private session, checks every step, and writes a GIF
+per theme. It runs on Linux, where the session is a headless compositor of
+its own, and on Windows, where it is a private desktop; see
+[Windows](#windows). This skill is what a session needs to write storyboards
+and drive matinee from the CLI.
 
 ## Commands
 
@@ -28,7 +30,9 @@ Options: `--artifacts <folder>` (run, record) saves a PNG at each passing
 `--stills` (record) also writes `<output>-<theme>-01.png` and on, one after
 each highlight step, for instructions and docs.
 `--view` (run, record) opens a live window on the user's Wayland desktop; it is
-for a person watching, so don't use it in an unattended session.
+for a person watching, so don't use it in an unattended session. It is not on
+Windows yet. `--screen` (Windows: run, record, snapshot, probe) runs the
+story's apps on the user's own screen; see [Windows](#windows).
 
 Exit status: 0 success, 1 a failed story or error (the message says which
 scene and step), 2 a usage mistake.
@@ -36,8 +40,8 @@ scene and step), 2 a usage mistake.
 ## The loop
 
 1. **Start from something that works.** Copy the closest example in matinee's
-   `examples/` (`terminal`, `calculator`, `mixed`, `callboard`, `cued`) or the
-   reference below. Put the storyboard in the user's project, conventionally
+   `examples/` (`terminal`, `calculator`, `mixed`, `callboard`, `cued`, or
+   `powershell` on Windows) or the reference below. Put the storyboard in the user's project, conventionally
    `docs/demo.toml` with `output = "assets/demo"`, or wherever they keep
    README assets.
 2. **`matinee check`** until it passes. It catches unknown keys, bad
@@ -67,7 +71,8 @@ milliseconds only: `"1.5s"`, `"600ms"`, `"60s"` (never `"1m"`).
 [demo]
 output = "assets/demo"          # writes assets/demo-light.gif and assets/demo-dark.gif
 size = [800, 600]               # logical points
-# scale = 2                     # 1-4; the app renders at size × scale
+# scale = 2                     # 1-4; the app renders at size × scale, and the
+                                # camera zooms up to it with real detail
 # fps = 15                      # 1-60
 # themes = ["light", "dark"]    # default both; at least one
 # lossy = 6                     # 0 exact to 32; higher is smaller and streakier
@@ -140,7 +145,8 @@ after the step), and `timeout`.
 | Pause | `{ hold = "2s" }` |
 
 **Targets.** Names match the accessible name exactly; a trailing `*` matches a
-prefix. Narrow with `role`, `within` (a named ancestor), `near` (a named
+prefix, and a `*` at both ends matches anywhere, as in a console window's
+whole buffer (`{ wait_for = "*Done*", role = "document text" }`). Narrow with `role`, `within` (a named ancestor), `near` (a named
 element nearby), `window` (the exact window title), and `in` (a launch name,
 or `"terminal"`). A missing, ambiguous, hidden, or offscreen target fails with
 a diagnostic listing what is there; scroll with keys or the app's own
@@ -160,12 +166,22 @@ qualify any assertion that must prove a GUI result.
 when `probe` shows nothing to name. They are logical points within the window;
 negative values count from the right or bottom. Name the window.
 
+**Captions** show during their scene. `[captions] position` places them for
+the story and `caption_position` for one scene: `bottom` (the default) or
+`top` over the frame, `auto` over the frame away from the newest highlight or
+the pointer, or a band `below` or `above` the frame, which covers nothing but
+makes the GIF taller. Use a band when a caption would cover what the scene
+shows, such as a terminal's last lines.
+
 **Highlights** mark part of the screen until the scene ends or highlights
 are cleared. A plain name marks the latest such text in the terminal pane,
 then in an app's text (Windows console windows; not on Linux yet), then a
-control with that name; selectors narrow it to a control. `style` is `box` or
-`spotlight`; `label` adds a callout and `number` a numbered marker. Highlight
-what a reader should look at, in the order they should read it.
+control with that name; selectors narrow it to a control. `{ from, to }`
+marks a section of lines, and `highlight_at = [x, y, w, h]` a rectangle in a
+window. `style` is `box` or `spotlight`; `label` adds a callout and `number`
+a numbered marker. The camera frames each mark. Highlight what a reader
+should look at, in the order they should read it. For docs that walk through
+a screen, record with `--stills` to get a PNG after each highlight.
 
 **Terminal stories.** `run` checks the exit status (0 unless `exit` says
 otherwise). `terminal` shows one command while `run` runs another, for
@@ -198,12 +214,53 @@ loopback. Programs see the theme being recorded in `MATINEE_THEME`.
 Build the program before recording, and point `path` at its build output, or
 use an installed binary. matinee does not build anything.
 
+## Windows
+
+Terminal stories run PowerShell in the terminal pane, so `run` commands are
+PowerShell. GUI stories need a signed-in, unlocked desktop session: from SSH
+or a service, making the private desktop fails with "Access is denied", so
+run matinee from a terminal in the user's session or a scheduled task that
+runs only when the user is logged on.
+
+- **The private desktop** (default) shows nothing on screen and leaves the
+  user's mouse and keyboard alone. Clicks and typed characters act on
+  controls through UI Automation, and what it can't do is posted to the
+  window, so consoles, Chromium browsers, and WinUI apps work there. Keys
+  other than typed characters (Enter, Tab, shortcuts) are only posted, which
+  WinUI and WPF apps ignore: click into a field instead of reaching it by
+  shortcut. Typing adds to the end of a field.
+- **`--screen`** runs the apps on the user's own screen, with real input.
+  It is needed for packaged (Store) apps, which open on the user's desktop,
+  and WPF apps, which draw nothing on a private desktop. Only the story's
+  windows are drawn or given input, but matinee moves the real pointer and
+  types, so the user must leave the mouse and keyboard alone.
+- **Packaged apps** launch by app ID, as `Get-StartApps` lists it, with
+  `--screen`: `app = "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"`. They
+  take no arguments, and matinee drives only an instance it started, so the
+  app must not already be running.
+- **Console windows**: launch `powershell.exe` as an app and it gets a
+  console window of its own. Set its title in `args` to give `wait_for` a
+  name. Match its output with `*text*` and `role = "document text"`.
+- **Scale and zoom**: apps draw at the display's scaling, not the story's.
+  Use `scale = 2` with the display at 200%, or `scale = 1` at 100%; matinee
+  warns when they differ, since apps then show larger or smaller than the
+  story lays them out. With `--screen`, `size` × `scale` must fit the
+  display.
+- **Browsers** started with a fresh profile on a machine signed in to a work
+  or Microsoft account may sign in and show the account over the page; start
+  them private, as with Edge's `--inprivate`.
+- **Not yet on Windows:** `--view`, driving the system theme (light and dark
+  look alike), and isolation: the session is a fresh profile, and commands
+  can read the user's files and use the network whatever `network` says.
+
 ## Size and legibility
 
 `record` prints each scene's seconds and kilobytes, and how much came while
 the camera moved. It warns above 5 MiB per theme with a moving camera, or
 2 MiB with a fixed one. Camera moves are the biggest cost; to shrink a GIF,
-cut moves, shorten holds, or lower `max_zoom` before raising `lossy`. A story
+cut moves, shorten holds, or lower `max_zoom` before raising `lossy`. The
+camera zooms no further than `scale`, so a story that needs close-ups sets
+`scale = 2`. A story
 meant for narrow screens sets a smaller `reading_width` and a larger
 terminal `font_size`.
 
@@ -222,7 +279,10 @@ terminal `font_size`.
   Read it before running it, and point out anything that deletes, sends, or
   reaches outside the project.
 - **Host settings.** Don't change sysctls, AppArmor, or installed packages;
-  tell the user what is missing.
+  tell the user what is missing. On Windows, don't change the display's
+  scaling or theme; tell the user what the story needs.
+- **`--screen`.** It takes over the user's pointer and keyboard while it
+  runs. Use it when the story needs it, and only when the user agrees.
 
 ## Troubleshooting
 
@@ -241,6 +301,15 @@ terminal `font_size`.
 - **A command can't find the program.** The session sees only `/usr`, the
   project, and declared `path` and `mounts`. Add the build folder to `path`.
 - **The run passes but the GIF is too big.** See Size and legibility.
+- **Windows: "creating a desktop: Access is denied".** matinee is running
+  from SSH or a service; run it in the user's desktop session.
+- **Windows: a packaged app is refused, or "no new process of it started".**
+  Add `--screen`, and close the app if it is already running.
+- **Windows: a WPF app's window is blank.** Use `--screen`.
+- **Windows: clicks or keys do nothing in a WinUI or WPF app.** Click into
+  the field rather than using a shortcut, or use `--screen`.
+- **Windows: the scale warning.** Ask the user to set the display's scaling
+  to the story's (200% for `scale = 2`), or change `scale` to match it.
 
 Read `STORYBOARD.md` in matinee's repository for the full format, and
 `SUPPORT.md` for what each toolkit supports.

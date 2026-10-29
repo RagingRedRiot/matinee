@@ -95,10 +95,19 @@ output anywhere in it with a `*` at both ends, as in
 text in a console window, and in other apps' text, through UI Automation,
 so `{ highlight = "Done" }` marks just that word in the console.
 
+## Scale and zoom
+
+The camera zooms in up to `demo.scale` with real detail, as on Linux, so a
+story at `scale = 2` can zoom in twice and stay sharp. Apps draw at the
+display's scaling, though, not the story's: set the display to 200% for a
+story at `scale = 2`, or to 100% for `scale = 1`. With the two apart, apps
+draw larger or smaller than the story lays them out for: at 150%, a story
+at `scale = 2` shows them at three quarters of their size. matinee warns
+when they differ. At `scale = 2` the story's screen is twice its size in
+pixels, and with `--screen` it must fit on the display.
+
 ## Not yet
 
 matinee does not drive the Windows theme yet, so light and dark recordings
-of an app look alike, and there is no canvas larger than the app for the
-zoom camera, so stories record at one pixel per point. The session's
-boundary is a fresh profile, not isolation: commands and apps can read
-your files and use the network.
+of an app look alike. The session's boundary is a fresh profile, not
+isolation: commands and apps can read your files and use the network.

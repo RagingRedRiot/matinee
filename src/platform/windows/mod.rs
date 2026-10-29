@@ -22,5 +22,8 @@ pub use wm::parent_of;
 
 /// The shell `matinee shell` runs by default, and the one seeds use.
 pub const SHELL: &str = "powershell.exe";
+/// Whether accessibility trees always report device pixels, as UI
+/// Automation does, rather than points or a mix.
+pub const ACCESSIBILITY_IN_PIXELS: bool = true;
 /// What the terminal pane's prompt shows before each command.
 pub const PROMPT_CHAR: &str = ">";

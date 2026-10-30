@@ -1,6 +1,6 @@
 # Supported configurations and evidence
 
-Matinee is unreleased. This matrix distinguishes automated evidence from
+This matrix distinguishes automated evidence from
 manual trials and work still needed before making broader claims. A working
 accessibility tree depends on the app's build, labels, and runtime settings,
 not just its toolkit.
@@ -15,6 +15,11 @@ not just its toolkit.
 | GTK 3, Qt 6, Electron | Experimental; validate the particular app | Not verified | No committed automated toolkit coverage yet |
 | Firefox, Chrome, Vivaldi, Brave, Wayland | Named page controls where the browser exposes them; point fallback | Site/browser dependent | Manual Google story trials; not a CI gate |
 | callboard and cued | Mixed terminal and semantic GUI stories | Both checked locally | Real-app examples rerun with fixed and moving cameras |
+| Windows terminal (PowerShell) | Real pseudo-console commands, input, exit status, output assertions | Light/dark pane | `examples/powershell`; manual runs on Windows 11 |
+| Windows console windows | Typed input; buffer text matched with `*text*`; text highlights through UI Automation | Not driven | Manual runs on Windows 11 |
+| Win32 and WinUI apps, private desktop | Named controls through UI Automation; clicks and typed characters act through it | Not driven | Notepad (`examples/notepad`) and Task Manager, manual runs on Windows 11 |
+| Edge, private desktop and `--screen` | Clicks and typing; start it with `--inprivate` | Not driven | Manual runs on Windows 11 |
+| Packaged apps, `--screen` | Real input sent only to the story's windows | Not driven | Calculator by app ID, manual runs on Windows 11 |
 
 Three levels of GUI use apply:
 
@@ -45,3 +50,8 @@ session state but leaves host files and networking reachable.
 Local integration baseline: Pop!_OS 24.04, GTK 4.14.5, Qt 5.15.13, Tk 8.6,
 on 2026-10-07. No cross-machine or byte-identical GIF promise is made. The
 new GitHub-hosted CI baseline remains to be confirmed.
+
+Windows evidence is manual runs on Windows 11 in October 2026, plus unit
+tests that CI runs on Windows Server 2022. A Windows session gives commands a
+fresh profile and environment but no isolation, and matinee does not drive the
+Windows theme yet.

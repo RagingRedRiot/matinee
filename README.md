@@ -8,14 +8,14 @@
 <p align="center">
   <b>README demos that keep up with your app.</b><br>
   Write the demo once as a script. matinee performs it against the real program, with seeded data and checked steps,
-  and records light and dark GIFs with a camera that follows the action. Terminals, desktop apps, or both, on Linux.
+  and records light and dark GIFs with a camera that follows the action. Terminals, desktop apps, or both, on Linux and Windows.
 </p>
 
 <p align="center">
   <a href="https://github.com/RagingRedRiot/matinee/actions/workflows/ci.yml"><img src="https://github.com/RagingRedRiot/matinee/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
   <img src="https://img.shields.io/badge/rust-1.87%2B-orange.svg?logo=rust" alt="Rust 1.87+">
-  <img src="https://img.shields.io/badge/platform-Linux-lightgrey.svg" alt="Platform: Linux">
+  <img src="https://img.shields.io/badge/platform-Linux%20%7C%20Windows-lightgrey.svg" alt="Platform: Linux and Windows">
 </p>
 
 <p align="center">
@@ -25,6 +25,7 @@
   <a href="STORYBOARD.md"><b>Storyboards</b></a> ·
   <a href="docs/web.md"><b>Web pages</b></a> ·
   <a href="docs/x11.md"><b>X11 apps</b></a> ·
+  <a href="docs/windows.md"><b>Windows</b></a> ·
   <a href="SUPPORT.md"><b>Support</b></a>
 </p>
 
@@ -48,10 +49,11 @@
   `<picture>` element like the one above.
 - **Terminals, GUIs, and both at once.** GTK and libadwaita apps, terminal
   stories, a terminal pane beside a window, live web pages in a browser, and
-  X11 apps through Xwayland.
-- **Nothing personal on screen.** Each demo runs in a private headless session
-  with its own compositor, so your files, windows, names, and logins stay out
-  of the recording. No desktop session or GPU needed.
+  X11 apps through Xwayland. On Windows, PowerShell, console windows, and
+  desktop apps on a private desktop of their own.
+- **Nothing personal on screen.** On Linux, each demo runs in a private
+  headless session with its own compositor, so your files, windows, names, and
+  logins stay out of the recording. No desktop session or GPU needed.
 
 ## Why matinee?
 
@@ -81,6 +83,19 @@ curl -fLO "$base/matinee-x86_64-linux.tar.gz" -O "$base/matinee-x86_64-linux.tar
 sha256sum -c matinee-x86_64-linux.tar.gz.sha256
 tar -xzf matinee-x86_64-linux.tar.gz matinee
 install -D -m 755 -t ~/.local/bin matinee
+```
+
+On Windows, download the release for x86_64 Windows and unpack `matinee.exe`
+somewhere on your `PATH`. GUI stories need a signed-in, unlocked desktop; see
+[Recording on Windows](docs/windows.md).
+
+```powershell
+$base = "https://github.com/RagingRedRiot/matinee/releases/latest/download"
+Invoke-WebRequest "$base/matinee-x86_64-windows.zip" -OutFile matinee-x86_64-windows.zip
+Invoke-WebRequest "$base/matinee-x86_64-windows.zip.sha256" -OutFile matinee-x86_64-windows.zip.sha256
+$expected = (Get-Content matinee-x86_64-windows.zip.sha256).Split(' ')[0]
+if ((Get-FileHash matinee-x86_64-windows.zip).Hash -ne $expected) { throw "checksum mismatch" }
+Expand-Archive matinee-x86_64-windows.zip matinee
 ```
 
 Or build from source with Rust 1.87 or newer:
@@ -152,6 +167,7 @@ matinee shell demo.toml                # a shell inside the isolated session the
 --fixed-too          # record: also write a fixed-camera GIF per theme
 --stills             # record: also write a PNG after each highlight step
 --no-isolation       # run on the host where user namespaces are unavailable
+--screen             # Windows: run the story's apps on your own desktop
 ```
 
 </details>
@@ -186,6 +202,10 @@ details about you and your machine cannot end up in a recording: your files,
 home folder, user and host names, other apps' windows, open sessions, and
 logins. A demo shows only the project and what the storyboard sets up.
 
+On Windows, a session gets a fresh profile and environment, and its apps run
+on a private desktop unless you pass `--screen`, but there is no isolation:
+commands and apps can read your files and use the network.
+
 The isolation is not a sandbox for running untrusted or dangerous software. Do
 not use matinee to detonate malware or contain anything malicious. It is not
 built or tested to withstand a program trying to escape, and it would not hold
@@ -198,6 +218,7 @@ up as a safety net.
 | [Storyboards](STORYBOARD.md) | Writing and checking a demo: sessions, launches, steps, assertions, the camera, and output |
 | [Web pages](docs/web.md) | Recording a live site through a browser, with tested launch flags for Firefox, Chrome, Vivaldi, and Brave |
 | [X11 apps](docs/x11.md) | Tk, Motif, and Qt apps through Xwayland, and Qt 5 accessibility on Wayland |
+| [Windows](docs/windows.md) | The private desktop, `--screen`, packaged apps, console windows, and display scaling |
 | [Agent skill](skills/matinee/SKILL.md) | Teaches an AI agent to write storyboards and run the check, probe, run, and record loop |
 | [Support](SUPPORT.md) | Which toolkits and themes are verified, and the evidence behind each |
 | [Vision](VISION.md) | Philosophy, goals, and what comes later |
@@ -205,8 +226,9 @@ up as a safety net.
 
 ## Status
 
-Linux x86_64 is the validated platform. See the [release notes](CHANGELOG.md)
-for what each version changed. Video output and crates.io publication are
+Linux x86_64 is the validated platform. Windows x86_64 is new in 0.2.0, with
+unit tests in CI and stories tried by hand; see [SUPPORT.md](SUPPORT.md). See
+the [release notes](CHANGELOG.md) for what each version changed. Video output and crates.io publication are
 deferred.
 
 ## Contributing

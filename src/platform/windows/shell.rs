@@ -116,6 +116,7 @@ impl Shell {
             }
         };
 
+        let shown = screen.clone();
         let mut reader = output;
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
@@ -136,7 +137,16 @@ impl Shell {
                     CloseHandle(process);
                     ClosePseudoConsole(console);
                 }
-                return Err(e);
+                // What the console showed, if anything, says why.
+                let contents = shown.lock().unwrap().screen().contents();
+                let contents = contents.trim();
+                if contents.is_empty() {
+                    return Err(e);
+                }
+                return Err(io::Error::new(
+                    e.kind(),
+                    format!("{e}; the terminal showed:\n{contents}"),
+                ));
             }
         };
         let (status_tx, statuses) = mpsc::channel();

@@ -1,6 +1,6 @@
 # Release notes
 
-## Unreleased
+## 0.2.0 — 2026-10-30
 
 Matinee now runs on Windows, and every recording gains placed captions,
 highlights, stills, and styles from the storyboard.

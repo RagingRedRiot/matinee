@@ -47,12 +47,17 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// The loop PowerShell runs: connect back to matinee, prove it is the
 /// shell matinee started, then read each command (one base64 line), run
 /// it, and write its status. `{port}` and `{token}` are filled in.
+///
+/// It calls .NET directly rather than through cmdlets such as `New-Object`
+/// until it has connected: on a machine with many modules installed, as on
+/// GitHub's Windows runners, the first cmdlet a PowerShell runs can take
+/// 12 seconds or more to load, and longer on a fresh machine.
 const LOOP: &str = r#"$ErrorActionPreference = 'Continue'
-$__client = New-Object System.Net.Sockets.TcpClient('127.0.0.1', {port})
+$__client = [System.Net.Sockets.TcpClient]::new('127.0.0.1', {port})
 $__stream = $__client.GetStream()
-$__utf8 = New-Object System.Text.UTF8Encoding($false)
-$__reader = New-Object System.IO.StreamReader($__stream, $__utf8)
-$__writer = New-Object System.IO.StreamWriter($__stream, $__utf8)
+$__utf8 = [System.Text.UTF8Encoding]::new($false)
+$__reader = [System.IO.StreamReader]::new($__stream, $__utf8)
+$__writer = [System.IO.StreamWriter]::new($__stream, $__utf8)
 $__writer.AutoFlush = $true
 $__writer.WriteLine('{token}')
 while ($null -ne ($__line = $__reader.ReadLine())) {

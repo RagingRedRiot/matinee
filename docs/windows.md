@@ -42,6 +42,11 @@ or Microsoft account may sign in to that account and show it in a
 welcome dialog over the page. Start it private, as with Edge's
 `--inprivate`, to keep the account off screen.
 
+Windows 11's Notepad keeps its open files and unsaved tabs outside the
+profile, so the session's fresh one does not reset it: it reopens them,
+and they appear in the recording. Before recording a story that launches
+Notepad, close its tabs, or set it to start a new session in its settings.
+
 ## On the screen
 
 ```sh
@@ -86,6 +91,19 @@ typed into and checked like any other window:
 [launch]
 app = "powershell.exe"
 args = ["-NoLogo", "-NoExit", "-Command", "$Host.UI.RawUI.WindowTitle = 'Windows PowerShell'"]
+wait_for = "Windows PowerShell"
+```
+
+With Windows Terminal installed, Windows hands a console program started
+this way to Terminal, which opens it on your own desktop instead of the
+session's: the launch then fails with "no app has published an
+accessibility tree". Launch the console host with the program as its
+argument, which keeps the window in the session:
+
+```toml
+[launch]
+app = "conhost.exe"
+args = ["powershell.exe", "-NoLogo", "-NoExit", "-Command", "$Host.UI.RawUI.WindowTitle = 'Windows PowerShell'"]
 wait_for = "Windows PowerShell"
 ```
 

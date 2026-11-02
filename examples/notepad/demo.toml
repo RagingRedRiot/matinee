@@ -1,6 +1,10 @@
 # A GUI demo on Windows: matinee drives classic Notepad on its own private
 # desktop, typing a note and checking the text it put there. Notepad
 # publishes a UI Automation tree, so the text is read by meaning, not pixels.
+#
+# Windows 11's Notepad reopens the files and tabs you left open, even in
+# matinee's fresh profile, and they show in the recording: close them first,
+# or set Notepad to start a new session (see docs/windows.md).
 
 [demo]
 output = "notepad"

@@ -1,5 +1,22 @@
 # Release notes
 
+## Unreleased
+
+Fixes for Windows stories.
+
+- Terminal stories no longer draw the prompt in the middle of a command's
+  output, and no longer lose the story's first command line. The shell
+  reports each command's status through the console, after its output.
+- A window that ignores matinee's first move, as a console window does about
+  one launch in a hundred, is moved again until it takes its place, rather
+  than keeping its default size.
+- A target outside the frame in a story without a terminal pane is reported
+  as past the screen's edge, not behind the pane.
+- [docs/windows.md](docs/windows.md) says that with Windows Terminal installed
+  a launched console program opens in Terminal, outside the session, and how
+  to keep it in with `conhost.exe`; and that Windows 11's Notepad reopens
+  the tabs you left open, in the recording.
+
 ## 0.2.0 — 2026-10-30
 
 Matinee now runs on Windows, and every recording gains placed captions,

@@ -3,12 +3,18 @@
 //! next.
 //!
 //! It does not read the terminal: matinee sends it each command over a
-//! loopback socket, and the shell reports each exit status back the same
-//! way. The command itself runs with the pseudo console as its input and
-//! output, so programs behave as they would for a person, and its output is
-//! exactly what appears. The socket stands in for the extra file
-//! descriptors bash gets on Linux, which a Windows process cannot inherit
-//! by number.
+//! loopback socket, in place of the extra file descriptors bash gets on
+//! Linux, which a Windows process cannot inherit by number. The command
+//! itself runs with the pseudo console as its input and output, so
+//! programs behave as they would for a person, and its output is exactly
+//! what appears.
+//!
+//! The shell reports each exit status through the console, as a window
+//! title, rather than over the socket. The console sends what a command
+//! printed in frames, some milliseconds after the command has returned, so
+//! a status sent over the socket could arrive before the end of the output,
+//! and the prompt be drawn in the middle of it. The title comes through
+//! the console's output after the text written before it.
 
 use super::boundary::Boundary;
 use std::{
@@ -45,8 +51,13 @@ const STILL_ACTIVE: u32 = 259;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The loop PowerShell runs: connect back to matinee, prove it is the
-/// shell matinee started, then read each command (one base64 line), run
-/// it, and write its status. `{port}` and `{token}` are filled in.
+/// shell matinee started, say it is ready, then read each command (one
+/// base64 line), run it, and report its status. `{port}` and `{token}` are
+/// filled in.
+///
+/// Reports are window titles: `{token}:ready`, then `{token}:N:status`
+/// after the Nth command, so that each one differs from the last and the
+/// console sends it.
 ///
 /// It calls .NET directly rather than through cmdlets such as `New-Object`
 /// until it has connected: on a machine with many modules installed, as on
@@ -60,21 +71,32 @@ $__reader = [System.IO.StreamReader]::new($__stream, $__utf8)
 $__writer = [System.IO.StreamWriter]::new($__stream, $__utf8)
 $__writer.AutoFlush = $true
 $__writer.WriteLine('{token}')
+$__n = 0
+$Host.UI.RawUI.WindowTitle = '{token}:ready'
 while ($null -ne ($__line = $__reader.ReadLine())) {
   $__command = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($__line))
   $global:LASTEXITCODE = 0
   $__ok = $true
   try { & ([scriptblock]::Create($__command)); $__ok = $? } catch { Write-Host $_.Exception.Message -ForegroundColor Red; $__ok = $false }
   $__status = if ($global:LASTEXITCODE) { $global:LASTEXITCODE } elseif ($__ok) { 0 } else { 1 }
-  $__writer.WriteLine([string]$__status)
+  $__n++
+  $Host.UI.RawUI.WindowTitle = "{token}:$__n`:$__status"
 }
 "#;
+
+/// What the shell reports through the console's title.
+enum Report {
+    /// It has connected, and the console has drawn its first frame.
+    Ready,
+    /// A command has finished with this status.
+    Status(i32),
+}
 
 pub struct Shell {
     /// The pseudo console's input: keys for whatever runs in it.
     input: File,
     commands: TcpStream,
-    statuses: Receiver<i32>,
+    statuses: Receiver<Report>,
     process: HANDLE,
     console: HPCON,
 }
@@ -123,18 +145,41 @@ impl Shell {
 
         let shown = screen.clone();
         let mut reader = output;
+        let (report_tx, statuses) = mpsc::channel();
+        let prefix = format!("{token}:");
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
+            let mut title = String::new();
             // Ends with an error once the console has closed.
             while let Ok(n) = reader.read(&mut buf) {
                 if n == 0 {
                     break;
                 }
-                screen.lock().unwrap().process(&buf[..n]);
+                let mut parser = screen.lock().unwrap();
+                parser.process(&buf[..n]);
+                if parser.screen().title() == title {
+                    continue;
+                }
+                title = parser.screen().title().to_string();
+                drop(parser);
+                let report = match title.strip_prefix(&prefix) {
+                    Some("ready") => Report::Ready,
+                    Some(rest) => match rest.split_once(':').map(|(_, s)| s.parse()) {
+                        Some(Ok(status)) => Report::Status(status),
+                        _ => continue,
+                    },
+                    // A title the command set.
+                    None => continue,
+                };
+                if report_tx.send(report).is_err() {
+                    break;
+                }
             }
         });
 
-        let commands = match accept(&listener, &token, process) {
+        let commands = match accept(&listener, &token, process)
+            .and_then(|stream| ready(&statuses, process).map(|()| stream))
+        {
             Ok(stream) => stream,
             Err(e) => {
                 unsafe {
@@ -154,21 +199,6 @@ impl Shell {
                 ));
             }
         };
-        let (status_tx, statuses) = mpsc::channel();
-        let status_reader = BufReader::new(commands.try_clone()?);
-        std::thread::spawn(move || {
-            for line in status_reader.lines() {
-                let Ok(line) = line else { break };
-                if let Ok(status) = line.trim().parse() {
-                    if status_tx.send(status).is_err() {
-                        break;
-                    }
-                }
-            }
-        });
-        // The console clears the screen as PowerShell attaches; let that
-        // through before the prompt is drawn.
-        std::thread::sleep(Duration::from_millis(300));
         Ok(Shell {
             input,
             commands,
@@ -188,7 +218,8 @@ impl Shell {
     /// The exit status of the last command, once it has finished.
     pub fn finished(&mut self) -> io::Result<Option<i32>> {
         match self.statuses.try_recv() {
-            Ok(status) => Ok(Some(status)),
+            Ok(Report::Status(status)) => Ok(Some(status)),
+            Ok(Report::Ready) => Ok(None),
             Err(mpsc::TryRecvError::Empty) => match exit_code(self.process) {
                 Some(code) => Err(io::Error::other(format!(
                     "the terminal's shell exited ({code})"
@@ -362,6 +393,32 @@ fn accept(listener: &TcpListener, token: &str, process: HANDLE) -> io::Result<Tc
     }
     stream.set_read_timeout(None)?;
     Ok(stream)
+}
+
+/// Wait for the shell to report that it is ready. The console clears the
+/// screen in the same frame as it sends that title, so what matinee draws
+/// afterwards stays.
+fn ready(statuses: &Receiver<Report>, process: HANDLE) -> io::Result<()> {
+    let start = Instant::now();
+    loop {
+        match statuses.recv_timeout(Duration::from_millis(20)) {
+            Ok(Report::Ready) => return Ok(()),
+            Ok(Report::Status(_)) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(io::Error::other("the terminal closed before it was ready"));
+            }
+        }
+        if let Some(code) = exit_code(process) {
+            return Err(io::Error::other(format!(
+                "powershell exited ({code}) before the terminal was ready"
+            )));
+        }
+        if start.elapsed() > CONNECT_TIMEOUT {
+            return Err(io::Error::other(
+                "powershell did not get the terminal ready in time",
+            ));
+        }
+    }
 }
 
 /// The process's exit code, once it has exited.

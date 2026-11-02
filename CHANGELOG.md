@@ -1,6 +1,6 @@
 # Release notes
 
-## Unreleased
+## 0.2.1 — 2026-11-02
 
 Fixes for Windows stories.
 

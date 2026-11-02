@@ -215,6 +215,11 @@ impl<'a> Session<'a> {
         self.terminal.as_mut().map(|(t, _)| t)
     }
 
+    /// Whether the story has a terminal pane.
+    pub fn has_terminal(&self) -> bool {
+        self.terminal.is_some()
+    }
+
     /// Start every app the storyboard launches.
     pub fn launch(&mut self, story: &Story) -> io::Result<()> {
         for launch in &story.launches {

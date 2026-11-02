@@ -14,7 +14,12 @@ use crate::{
     platform::{Button, Window},
     story::{Story, Theme},
 };
-use std::{collections::HashSet, io, sync::Once, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    io,
+    sync::Once,
+    time::Duration,
+};
 use windows_sys::Win32::{
     Foundation::POINT,
     Graphics::Gdi::{MONITOR_DEFAULTTOPRIMARY, MonitorFromPoint},
@@ -55,6 +60,10 @@ fn scale_warning(display: u32, scale: u32) -> String {
 /// The desktop background behind windows, the same gray as on Linux.
 const BACKGROUND: u32 = 0xff80_8c8c;
 
+/// How many times a window is moved to its place before it is left where
+/// it is (see [`Display::place_new_windows`]).
+const PLACE_TRIES: u32 = 10;
+
 pub struct Display {
     /// Where the apps run: the private desktop, or the screen. Held for its
     /// lifetime: dropping it ends the session's apps, and returns the
@@ -87,6 +96,8 @@ pub struct Display {
     /// The windows matinee has already given their place, by `HWND`, so a
     /// window is placed once and then left where the app may move it.
     placed: HashSet<isize>,
+    /// How many times each window not yet placed has been moved, by `HWND`.
+    tries: HashMap<isize, u32>,
 }
 
 impl Display {
@@ -137,6 +148,7 @@ impl Display {
             buttons: 0,
             modifiers: input::Modifiers::default(),
             placed: HashSet::new(),
+            tries: HashMap::new(),
         })
     }
 
@@ -162,6 +174,12 @@ impl Display {
     /// window at least as large as the area is sized to fill it; a smaller
     /// window or a dialog is centered at its own size. Each window is placed
     /// once and then remembered.
+    ///
+    /// A window still starting up can ignore the move, though Windows
+    /// reports it done; a console window does about one time in a hundred.
+    /// So a window counts as placed once it is where it was put, and is
+    /// moved again on later calls until it is, up to [`PLACE_TRIES`] times:
+    /// an app that keeps a larger minimum size never fits.
     fn place_new_windows(&mut self) {
         let (ax, ay, aw, ah) = self.area;
         let s = self.scale as i32;
@@ -173,17 +191,27 @@ impl Display {
             if self.placed.contains(&id) {
                 continue;
             }
-            if wm::is_owned(hwnd) {
+            let r = wm::visible_rect(hwnd);
+            let wanted = if wm::is_owned(hwnd) {
                 // A dialog keeps its own size, centered in the area.
-                let r = wm::visible_rect(hwnd);
                 let (ww, wh) = ((r.right - r.left) / s, (r.bottom - r.top) / s);
                 let (x, y) = (ax + (aw - ww) / 2, ay + (ah - wh) / 2);
                 wm::place(hwnd, x * s, y * s, None);
+                (x * s, y * s, r.right - r.left, r.bottom - r.top)
             } else {
                 // A top-level window fills the area, as the Linux compositor
                 // tiles one, so a demo frames the app the same way.
                 wm::place(hwnd, ax * s, ay * s, Some((aw * s, ah * s)));
+                (ax * s, ay * s, aw * s, ah * s)
+            };
+            let r = wm::visible_rect(hwnd);
+            let tries = self.tries.entry(id).or_insert(0);
+            *tries += 1;
+            if (r.left, r.top, r.right - r.left, r.bottom - r.top) != wanted && *tries < PLACE_TRIES
+            {
+                continue;
             }
+            self.tries.remove(&id);
             if self.screen {
                 // Above the user's own windows, so what is drawn and what
                 // takes input is the app.

@@ -905,10 +905,17 @@ impl<'r, 'b> Runner<'r, 'b> {
         let (ax, ay, aw, ah) = self.session.window_area();
         let inside = |v: f64, start: i32, len: i32| v >= start as f64 && v < (start + len) as f64;
         if !inside(point.0, ax, aw) || !inside(point.1, ay, ah) {
-            return Err(format!(
-                "\"{}\" is behind the terminal pane: the window is {}x{} but the space beside the pane is {aw}x{ah}; make the pane smaller or the screen larger",
-                target.name, window.width, window.height
-            ));
+            return Err(if self.session.has_terminal() {
+                format!(
+                    "\"{}\" is behind the terminal pane: the window is {}x{} but the space beside the pane is {aw}x{ah}; make the pane smaller or the screen larger",
+                    target.name, window.width, window.height
+                )
+            } else {
+                format!(
+                    "\"{}\" is past the screen's edge: the window is {}x{} but the screen is {aw}x{ah}; make the story's size larger",
+                    target.name, window.width, window.height
+                )
+            });
         }
         let (left, top) = (window.x as f64 + x as f64, window.y as f64 + y as f64);
         Ok(Found {

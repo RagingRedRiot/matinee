@@ -21,9 +21,21 @@ font_size = 16
 [[seed]]
 run = "mkdir -p ~/cued/target && ln -s \"$(dirname \"$(command -v cued)\")\" ~/cued/target/release"
 
+[captions]
+# In a band below the frame, so captions cover neither the viewport nor the
+# terminal.
+position = "below"
+
 [[scene]]
+caption = "matinee runs a story, and --view shows it live"
 steps = [
   { hold = "1s" },
-  { run = "matinee run --view ../cued/demo.toml", timeout = "120s", hold = "2s" },
-  { expect = "all 10 steps passed" },
+  { run = "matinee run --view ../cued/demo.toml", timeout = "120s", hold = "1s" },
+]
+
+[[scene]]
+caption = "Every step is checked"
+steps = [
+  { expect = "all 12 steps passed" },
+  { highlight = "all 12 steps passed", label = "the story passed", color = "#16a34a", hold = "2s" },
 ]

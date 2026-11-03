@@ -10,6 +10,21 @@ size = [1200, 860]
 [session]
 path = ["~/cued/target/release"]
 
+# Overlays in cued's own colors: its blue accent and slate neutrals.
+[style]
+accent = "#0057fc"
+ripple = "#0057fc"
+caption_text = "#0f172a"
+caption_backing = "#ffffff"
+caption_border = "#e1e5eb"
+
+[style.dark]
+accent = "#3b7bff"
+ripple = "#3b7bff"
+caption_text = "#e6eaf0"
+caption_backing = "#151b24"
+caption_border = "#263040"
+
 [terminal]
 size = 130
 font_size = 15
@@ -31,7 +46,9 @@ steps = [
   { click = "Graph" },
   # Frame the graph, from lint to smoke-test, while the run plays out.
   { camera = { focus = "deploy box*", zoom = 1.4 } },
-  { wait_for = "j3 release, done*", timeout = "40s", hold = "2.5s" },
+  { wait_for = "j3 release, done*", timeout = "40s", hold = "0.6s" },
+  # cued's success and danger colors.
+  { highlight = "smoke-test box*", label = "shipped", color = "#2f8f5b", hold = "2s" },
 ]
 
 [[scene]]
@@ -40,5 +57,6 @@ steps = [
   { run = "cued submit hotfix.toml" },
   { click = "j4 hotfix*" },
   { camera = { focus = "deploy box*", zoom = 1.4 } },
-  { wait_for = "j4 hotfix, failed*", timeout = "30s", hold = "3s" },
+  { wait_for = "j4 hotfix, failed*", timeout = "30s", hold = "0.6s" },
+  { highlight = "rollback box*", style = "spotlight", label = "rolled back", color = "#c93730", hold = "2.4s" },
 ]

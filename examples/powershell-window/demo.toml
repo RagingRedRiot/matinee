@@ -1,0 +1,56 @@
+# A real Windows PowerShell console window, not matinee's terminal pane:
+# matinee launches conhost with PowerShell on its own private desktop, types
+# into it, and reads the console's text through UI Automation, so tab
+# completion and error colors are PowerShell's own.
+#
+# conhost is named directly so that, with Windows Terminal installed, the
+# window stays in the session rather than opening in Terminal on your own
+# desktop (see docs/windows.md).
+
+[demo]
+output = "powershell-window"
+size = [800, 480]
+scale = 1
+# One theme for now: matinee does not yet drive the Windows theme, so the
+# console looks the same in both.
+themes = ["light"]
+
+[captions]
+# In a band below the frame, so captions never cover the console.
+position = "below"
+
+[launch]
+app = "conhost.exe"
+args = ["powershell.exe", "-NoLogo", "-NoExit", "-Command", "$Host.UI.RawUI.WindowTitle = 'Windows PowerShell'; function prompt { 'PS> ' }"]
+wait_for = "Windows PowerShell"
+
+[[scene]]
+caption = "A real PowerShell window"
+steps = [
+  { hold = "0.6s" },
+  { type = "Get-Service Spooler, EventLog", hold = "0.4s" },
+  { key = "enter" },
+  { wait_for = "*Windows Event Log*", role = "document text" },
+  { highlight = { from = "Status", to = "Print Spooler" }, label = "live, from this machine", hold = "1.6s" },
+]
+
+[[scene]]
+caption = "Tab completion is PowerShell's own"
+steps = [
+  { type = "Get-Proc", hold = "0.5s" },
+  { key = "tab", hold = "0.8s" },
+  { expect = "*Get-Process*", role = "document text" },
+  { type = " -Id $PID", hold = "0.4s" },
+  { key = "enter" },
+  { wait_for = "*ProcessName*", role = "document text" },
+  { highlight = { from = "Handles", to = "powershell" }, label = "this window's own process", hold = "1.6s" },
+]
+
+[[scene]]
+caption = "And so are its errors"
+steps = [
+  { type = "Get-Item C:\\notes\\done.txt", hold = "0.4s" },
+  { key = "enter" },
+  { wait_for = "*Cannot find path*", role = "document text" },
+  { highlight = { from = "Cannot find path", to = "FullyQualifiedErrorId" }, label = "PowerShell's error, in its colors", color = "#dc2626", hold = "1.8s" },
+]

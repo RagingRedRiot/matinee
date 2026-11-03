@@ -1,4 +1,6 @@
-# Adds two numbers in GNOME Calculator, by clicking and by typing.
+# Adds two numbers in GNOME Calculator, by clicking and by typing. Numbered
+# highlights walk through each click, so `matinee record --stills` also
+# writes a PNG per step, ready for written instructions.
 
 [demo]
 output = "calculator"
@@ -10,13 +12,24 @@ wait_for = "="
 
 [[scene]]
 caption = "Click the buttons"
+# Over the frame, on the half away from the newest highlight.
+caption_position = "auto"
 steps = [
+  { highlight = "7", role = "button", number = 1, hold = "0.4s" },
   { click = "7" },
+  { clear = "highlights" },
+  { highlight = "+", role = "button", number = 2, hold = "0.4s" },
   { click = "+" },
+  { clear = "highlights" },
+  { highlight = "8", role = "button", number = 3, hold = "0.4s" },
   { click = "8" },
   { expect = "7+8" },
-  { click = "=", hold = "1s" },
+  { clear = "highlights" },
+  { highlight = "=", role = "button", number = 4, hold = "0.4s" },
+  { click = "=", hold = "0.6s" },
   { expect = "15", role = "text box" },
+  { clear = "highlights" },
+  { highlight = "15", role = "label", style = "spotlight", label = "7 + 8 = 15", hold = "1.6s" },
 ]
 
 [[scene]]
@@ -24,6 +37,7 @@ caption = "Or type"
 steps = [
   { type = "6*7" },
   { expect = "6×7" },
-  { key = "enter", hold = "1s" },
+  { key = "enter", hold = "0.6s" },
   { expect = "42", role = "text box" },
+  { highlight = "42", role = "label", style = "spotlight", label = "6 × 7 = 42", hold = "1.6s" },
 ]

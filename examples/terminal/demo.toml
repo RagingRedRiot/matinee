@@ -1,5 +1,6 @@
 # A terminal-only demo: a real command, a staged one that shows `gh` while
-# reading a fixture, canned output, and a command expected to fail.
+# reading a fixture, canned output, and a command expected to fail, with
+# highlights on the output that matters.
 
 [demo]
 output = "terminal"
@@ -8,16 +9,36 @@ size = [800, 400]
 [terminal]
 font_size = 18
 
+[captions]
+# In a band below the frame, so captions never cover the output.
+position = "below"
+
 [[seed]]
 run = "mkdir -p ~/notes && printf 'buy milk\\nrecord the demo\\n' > ~/notes/todo.txt"
 
 [[scene]]
+caption = "Real commands, in a fresh home"
 steps = [
-  { run = "cat ~/notes/todo.txt", hold = "1s" },
+  { run = "cat ~/notes/todo.txt", hold = "0.6s" },
   { expect = "record the demo" },
+  { highlight = "record the demo", label = "seeded by the story", hold = "1.2s" },
+]
+
+[[scene]]
+caption = "Staged commands, backed by fixtures"
+steps = [
   # shown in the terminal / actually run
-  { terminal = "gh pr list --author @me", run = "cat fixtures/prs.txt", hold = "1.5s" },
+  { terminal = "gh pr list --author @me", run = "cat fixtures/prs.txt", hold = "0.6s" },
   { expect = "Fix flaky upload retry" },
-  { terminal = "gh auth status", output = "fixtures/auth.txt", hold = "1.5s" },
-  { run = "false", exit = 1, hold = "1s" },
+  { highlight = "Fix flaky upload retry", label = "from fixtures/prs.txt", hold = "1.4s" },
+  { clear = "highlights" },
+  { terminal = "gh auth status", output = "fixtures/auth.txt", hold = "0.6s" },
+  { highlight = { from = "github.com", to = "Active account" }, label = "canned output", hold = "1.4s" },
+]
+
+[[scene]]
+caption = "Failures are checked too"
+steps = [
+  { run = "cat done.txt", exit = 1, hold = "0.4s" },
+  { highlight = "No such file or directory", label = "exit 1, as expected", color = "#dc2626", hold = "1.6s" },
 ]

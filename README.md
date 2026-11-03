@@ -176,8 +176,8 @@ matinee shell demo.toml                # a shell inside the isolated session the
 
 | | |
 | :---: | :---: |
-| <a href="examples/calculator/demo.toml"><img src="examples/calculator/calculator-light.gif" alt="GNOME Calculator: clicking 7 + 8 and typing 6×7" width="100%"></a><br>[**calculator**](examples/calculator/demo.toml): clicks and typing in GNOME Calculator | <a href="examples/terminal/demo.toml"><img src="examples/terminal/terminal-light.gif" alt="A terminal demo with a staged gh command and canned output" width="100%"></a><br>[**terminal**](examples/terminal/demo.toml): a staged `gh` command backed by a fixture |
-| <a href="examples/mixed/demo.toml"><img src="examples/mixed/mixed-light.gif" alt="A terminal pane below an app window" width="100%"></a><br>[**mixed**](examples/mixed/demo.toml): a terminal pane below an app window | <a href="examples/cued/demo.toml"><img src="examples/cued/cued-light.gif" alt="cued's status window following a release pipeline as a graph" width="100%"></a><br>[**cued**](examples/cued/demo.toml): a release pipeline with a loop, a rollback, and a success |
+| <a href="examples/calculator/demo.toml"><img src="examples/calculator/calculator-light.gif" alt="GNOME Calculator: numbered highlights walk through clicking 7 + 8, then a spotlight on each result" width="100%"></a><br>[**calculator**](examples/calculator/demo.toml): numbered steps and a spotlight; with `--stills`, a PNG per step | <a href="examples/terminal/demo.toml"><img src="examples/terminal/terminal-light.gif" alt="A terminal demo: a staged gh command, canned output, and an expected failure, each highlighted with a label" width="100%"></a><br>[**terminal**](examples/terminal/demo.toml): staged commands, canned output, and highlights |
+| <a href="examples/mixed/demo.toml"><img src="examples/mixed/mixed-light.gif" alt="bc in a terminal pane works out 7 + 8, and the calculator above agrees" width="100%"></a><br>[**mixed**](examples/mixed/demo.toml): typing into a program in the terminal pane, checked against the app above | <a href="examples/cued/demo.toml"><img src="examples/cued/cued-light.gif" alt="cued's status window following a release pipeline as a graph, with the shipped step marked green and the rollback red" width="100%"></a><br>[**cued**](examples/cued/demo.toml): a release pipeline with a loop, a rollback, and a success, styled in cued's colors |
 
 More in [`examples/`](examples/):
 
@@ -191,6 +191,9 @@ More in [`examples/`](examples/):
 - [**web-google**](examples/web-google/demo.toml): a live Google search
   recorded as a page-only demo in Firefox. Chrome, Vivaldi, and Brave were also
   tested; see [Recording a webpage](docs/web.md).
+- [**powershell-window**](examples/powershell-window/demo.toml): a real
+  Windows PowerShell console window, not the terminal pane, with its own tab
+  completion and error colors; see [Recording on Windows](docs/windows.md).
 
 The callboard, cued, and matinee examples need those projects built in
 checkouts beside this one.

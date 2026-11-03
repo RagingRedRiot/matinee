@@ -1,5 +1,5 @@
-# A terminal pane below an app window: a command checks the sum the
-# calculator is about to show.
+# A terminal pane below an app window: bc, a program waiting for input in
+# the terminal, works out a sum, and the calculator above checks it.
 
 [demo]
 output = "mixed"
@@ -9,16 +9,40 @@ size = [800, 760]
 size = 220
 font_size = 16
 
+[captions]
+# In a band below the frame, so captions cover neither the app nor the pane.
+position = "below"
+
 [launch]
 app = "gnome-calculator"
 wait_for = "="
 
 [[scene]]
+caption = "Type into a program running in the terminal"
 steps = [
-  { run = "echo $((7 + 8))", hold = "500ms" },
+  # Left running, so later steps can type into it.
+  { run = "bc -q", wait = false, hold = "0.4s" },
+  { type = "7 + 8", in = "terminal", hold = "0.4s" },
+  { key = "enter", in = "terminal" },
+  { wait_for = "15" },
+  { highlight = "15", label = "bc's answer", hold = "1.2s" },
+]
+
+[[scene]]
+caption = "Check it in the app above"
+steps = [
   { click = "7" },
   { click = "+" },
   { click = "8" },
-  { click = "=", hold = "1s" },
+  { click = "=", hold = "0.6s" },
   { expect = "15", role = "text box", in = "gnome-calculator" },
+  { highlight = "15", role = "label", in = "gnome-calculator", label = "the calculator agrees", color = "#16a34a", hold = "1.6s" },
+]
+
+[[scene]]
+caption = "Quit bc, and its exit status is checked"
+steps = [
+  { type = "quit", in = "terminal", hold = "0.3s" },
+  { key = "enter", in = "terminal" },
+  { wait_exit = "bc -q", hold = "1s" },
 ]

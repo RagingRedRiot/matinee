@@ -117,7 +117,7 @@ fn run_clicks_and_types_through_the_calculator_story() {
         "{stdout}{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(stdout.contains("all 10 steps passed"), "{stdout}");
+    assert!(stdout.contains("all 20 steps passed"), "{stdout}");
 }
 
 #[test]

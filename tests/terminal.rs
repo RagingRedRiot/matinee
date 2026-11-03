@@ -41,7 +41,7 @@ fn the_terminal_example_passes() {
         "{text}{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(text.contains("all 6 steps passed"), "{text}");
+    assert!(text.contains("all 11 steps passed"), "{text}");
 }
 
 #[test]

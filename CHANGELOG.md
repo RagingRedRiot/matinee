@@ -1,6 +1,6 @@
 # Release notes
 
-## Unreleased
+## 0.3.0 — 2026-11-04
 
 Recordings move faster: long command lines type quickly, and a slow
 command's wait can play sped up, with a badge saying so.

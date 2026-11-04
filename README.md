@@ -181,6 +181,9 @@ matinee shell demo.toml                # a shell inside the isolated session the
 
 More in [`examples/`](examples/):
 
+- [**xz**](examples/xz/demo.toml): xz compresses 43 MB of logs, which takes
+  about 20 seconds, and the scene's time budget plays that wait faster, with
+  a badge saying how much.
 - [**callboard**](examples/callboard/demo.toml): the demo in
   [callboard](https://github.com/RagingRedRiot/callboard)'s README. A script
   posts a feed, an item is dragged onto a board, and Ctrl+K jumps back after

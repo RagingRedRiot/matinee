@@ -1,0 +1,50 @@
+# A slow command, sped up in the recording: xz compresses a day of web
+# server logs, which takes tens of seconds, and the scene's budget plays
+# that wait faster, with a badge saying how much faster. The compression is
+# real; only the GIF is shorter.
+
+[demo]
+output = "xz"
+# Wide enough for xz's progress line, which it rewrites in place.
+size = [1000, 440]
+
+[terminal]
+font_size = 18
+
+[camera]
+# The whole pane stays readable at this width, so the camera holds still.
+mode = "fixed"
+
+[captions]
+# In a band below the frame, so captions never cover the output.
+position = "below"
+
+# A day of access logs, 43 MB, generated in the session's home.
+[[seed]]
+run = """
+mkdir -p ~/logs && seq 1 750000 | awk '{ printf "2026-11-04T%02d:%02d:%02d 10.0.%d.%d GET /api/items/%d 200 %dms\\n", int($1 / 36000) % 24, int($1 / 600) % 60, int($1 / 10) % 60, $1 % 7, $1 % 251, $1 % 9973, $1 % 97 }' > ~/logs/access.log
+"""
+
+[[scene]]
+caption = "A day of web server logs"
+steps = [
+  { run = "ls -lh ~/logs", hold = "0.6s" },
+  { highlight = "access.log", label = "43 MB", hold = "1.2s" },
+]
+
+[[scene]]
+caption = "Compressing takes a while, so the recording speeds it up"
+# The longest this scene may take in the GIF. The compression takes tens of
+# seconds, so its wait plays 4 to 16 times faster, depending on the machine.
+budget = "10s"
+steps = [
+  { run = "xz -6 --threads=1 --verbose --keep ~/logs/access.log", timeout = "300s", hold = "0.6s" },
+  { highlight = "100 %", color = "#16a34a", hold = "1.4s" },
+]
+
+[[scene]]
+caption = "From 43 MB to 1.9 MB"
+steps = [
+  { run = "ls -lh ~/logs", hold = "0.6s" },
+  { highlight = "access.log.xz", label = "1.9 MB", color = "#16a34a", hold = "1.6s" },
+]

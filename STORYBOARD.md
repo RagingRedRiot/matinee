@@ -214,6 +214,8 @@ A step can also set its own speed with `fast_forward = "8x"`, from `"2x"`
 to `"32x"`, with or without a budget, or keep real time with
 `fast_forward = "off"`. On a `run` that does not wait, put it on the
 `wait_exit` step. The badge sits at the bottom right, like key badges.
+The [xz example](examples/xz/demo.toml) compresses a log file under a
+budget.
 
 ## Camera and output
 

@@ -1,5 +1,30 @@
 # Release notes
 
+## Unreleased
+
+Recordings move faster: long command lines type quickly, and a slow
+command's wait can play sped up, with a badge saying so.
+
+- A command line types one character per frame, but never takes longer
+  than 4 seconds, then pauses half a second before it runs. A
+  100-character line used to take about 7 seconds. `[timing] typing`
+  changes the limit for a story, a step's `typing` changes it for one
+  line, and `"instant"` shows a line at once. `type` and `key` steps keep
+  their pace.
+- A scene's `budget`, or `[timing] budget` for every scene, is the
+  longest the scene may take in the GIF. When it would take longer, its
+  waits (a command running, `wait_exit`, `wait_for`, and `expect`) play
+  2 to 32 times faster, the slowest that fits. Typing, holds, motion, and
+  waits of a second or less keep their time, and `matinee record` warns
+  when even 32 times does not fit. Nothing is sped up unless a story asks.
+- A step's `fast_forward = "8x"` sets its own speed, and
+  `fast_forward = "off"` keeps real time.
+- A `▶▶ 8×` badge shows while a wait plays sped up;
+  `[timing] badge = false` hides it. The run itself keeps real time, and
+  only the GIF is shorter.
+- A new [xz example](examples/xz/demo.toml) compresses 43 MB of logs
+  under a budget.
+
 ## 0.2.1 — 2026-11-02
 
 Fixes for Windows stories.

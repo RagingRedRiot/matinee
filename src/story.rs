@@ -29,7 +29,55 @@ pub struct Story {
     pub captions: CaptionPosition,
     /// How overlays look, in each theme.
     pub style: Style,
+    /// How fast command lines type, and how long waits are sped up.
+    pub timing: Timing,
     pub scenes: Vec<Scene>,
+}
+
+/// `[timing]`: the pace of typing and of waits in recordings.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Timing {
+    /// How long a command line takes to type, unless a step says otherwise.
+    pub typing: Typing,
+    /// Whether recordings show a badge while a wait is sped up.
+    pub badge: bool,
+}
+
+impl Default for Timing {
+    fn default() -> Timing {
+        Timing {
+            typing: Typing::Within(TYPING),
+            badge: true,
+        }
+    }
+}
+
+/// How long a command line takes to type, unless a story says otherwise.
+pub const TYPING: Duration = Duration::from_secs(4);
+
+/// The shortest scene budget. A budget never speeds up waits this short or
+/// shorter, so a smaller one could not be met by speeding any up.
+pub const BUDGET_FLOOR: Duration = Duration::from_secs(1);
+
+/// The fastest a wait is played back.
+pub const MAX_SPEED: u32 = 32;
+
+/// How a command line is typed on screen.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Typing {
+    /// All at once.
+    Instant,
+    /// One character per frame, but the whole line within this time.
+    Within(Duration),
+}
+
+/// How a step's wait plays in a recording.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FastForward {
+    /// In real time, whatever the scene's budget.
+    Off,
+    /// This many times faster, whatever the scene's budget.
+    Times(u32),
 }
 
 /// The colors and text size of captions, badges, highlights, and click
@@ -309,6 +357,9 @@ pub struct Scene {
     pub caption: Option<String>,
     /// Where this scene's caption goes, in place of the story's.
     pub caption_position: Option<CaptionPosition>,
+    /// How long the scene may take in a recording; waits are sped up to
+    /// fit. Comes from the scene, or else `[timing]`.
+    pub budget: Option<Duration>,
     pub steps: Vec<Step>,
 }
 
@@ -319,6 +370,10 @@ pub struct Step {
     pub hold: Option<Duration>,
     /// How long to wait for a target, an assertion, or a command.
     pub timeout: Option<Duration>,
+    /// How a command line is typed, in place of the story's.
+    pub typing: Option<Typing>,
+    /// How the step's wait plays, in place of the scene's budget.
+    pub fast_forward: Option<FastForward>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -563,8 +618,17 @@ struct RawStory {
     terminal: Option<RawTerminal>,
     captions: Option<RawCaptions>,
     style: Option<RawStyle>,
+    timing: Option<RawTiming>,
     #[serde(default)]
     scene: Vec<RawScene>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTiming {
+    typing: Option<String>,
+    budget: Option<String>,
+    badge: Option<bool>,
 }
 
 /// `[style]`: keys for every theme, and `light` and `dark` tables of the
@@ -745,6 +809,7 @@ struct RawSession {
 struct RawScene {
     caption: Option<String>,
     caption_position: Option<CaptionPosition>,
+    budget: Option<String>,
     steps: Vec<RawStep>,
 }
 
@@ -789,6 +854,8 @@ struct RawStep {
     app: Option<String>,
     hold: Option<String>,
     timeout: Option<String>,
+    typing: Option<String>,
+    fast_forward: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -838,6 +905,63 @@ struct RawFocusAt {
 fn duration(field: &str, text: Option<String>) -> Result<Option<Duration>, String> {
     text.map(|t| parse_duration(&t).map_err(|e| format!("{field}: {e}")))
         .transpose()
+}
+
+/// `"instant"`, or the time to type a whole line in.
+fn typing(field: &str, text: Option<String>) -> Result<Option<Typing>, String> {
+    match text.as_deref() {
+        None => Ok(None),
+        Some("instant") => Ok(Some(Typing::Instant)),
+        Some(t) => {
+            let d = parse_duration(t)
+                .map_err(|_| format!("{field}: write \"instant\" or a duration like \"1.2s\""))?;
+            if d.is_zero() {
+                return Err(format!("{field}: use \"instant\" rather than no time"));
+            }
+            Ok(Some(Typing::Within(d)))
+        }
+    }
+}
+
+/// A scene's budget: `"off"` for none, or a duration of at least the floor.
+/// `None` when not written; `Some(None)` for `"off"`.
+fn budget(field: &str, text: Option<String>) -> Result<Option<Option<Duration>>, String> {
+    match text.as_deref() {
+        None => Ok(None),
+        Some("off") => Ok(Some(None)),
+        Some(t) => {
+            let d = parse_duration(t)
+                .map_err(|_| format!("{field}: write a duration like \"10s\", or \"off\""))?;
+            if d < BUDGET_FLOOR {
+                return Err(format!(
+                    "{field}: a budget must be at least {}s, since a budget never speeds up shorter waits",
+                    BUDGET_FLOOR.as_secs()
+                ));
+            }
+            Ok(Some(Some(d)))
+        }
+    }
+}
+
+/// `"off"`, or a speed like `"8x"`, from 2 to the fastest.
+fn fast_forward(text: Option<String>) -> Result<Option<FastForward>, String> {
+    let bad = |t: &str| {
+        format!("fast_forward: `{t}` is not \"off\" or a speed from \"2x\" to \"{MAX_SPEED}x\"")
+    };
+    match text.as_deref() {
+        None => Ok(None),
+        Some("off") => Ok(Some(FastForward::Off)),
+        Some(t) => {
+            let n: u32 = t
+                .strip_suffix('x')
+                .and_then(|n| n.trim().parse().ok())
+                .ok_or_else(|| bad(t))?;
+            if !(2..=MAX_SPEED).contains(&n) {
+                return Err(bad(t));
+            }
+            Ok(Some(FastForward::Times(n)))
+        }
+    }
 }
 
 impl RawStory {
@@ -936,6 +1060,17 @@ impl RawStory {
             ease: duration("camera.ease", c.ease)?.unwrap_or(Duration::from_millis(400)),
         };
 
+        let (timing, story_budget) = match self.timing {
+            None => (Timing::default(), None),
+            Some(t) => (
+                Timing {
+                    typing: typing("timing.typing", t.typing)?.unwrap_or(Typing::Within(TYPING)),
+                    badge: t.badge.unwrap_or(true),
+                },
+                budget("timing.budget", t.budget)?.flatten(),
+            ),
+        };
+
         if self.scene.is_empty() {
             return Err("a storyboard needs at least one [[scene]]".into());
         }
@@ -957,9 +1092,12 @@ impl RawStory {
                     si + 1
                 ));
             }
+            let budget =
+                budget(&format!("scene {}: budget", si + 1), raw.budget)?.unwrap_or(story_budget);
             scenes.push(Scene {
                 caption: raw.caption,
                 caption_position: raw.caption_position,
+                budget,
                 steps,
             });
         }
@@ -1019,6 +1157,7 @@ impl RawStory {
             terminal,
             captions,
             style,
+            timing,
             scenes,
         })
     }
@@ -1114,6 +1253,8 @@ impl RawStep {
     fn check(mut self, launches: &[Launch], dir: &Path, max_zoom: f64) -> Result<Step, String> {
         let hold = duration("hold", self.hold.take())?;
         let timeout = duration("timeout", self.timeout.take())?;
+        let typing = typing("typing", self.typing.take())?;
+        let fast_forward = fast_forward(self.fast_forward.take())?;
 
         let actions: Vec<&str> = [
             ("run", self.run.is_some()),
@@ -1161,6 +1302,19 @@ impl RawStep {
             );
         }
         only_with("output", self.output.is_some(), &["terminal", "run"])?;
+        only_with("typing", typing.is_some(), &["run", "terminal"])?;
+        only_with(
+            "fast_forward",
+            fast_forward.is_some(),
+            &["run", "wait_exit", "wait_for", "expect"],
+        )?;
+        if self.wait == Some(false) && fast_forward.is_some() {
+            return Err(
+                "a `run` that does not wait has nothing to speed up; put `fast_forward` on the \
+                 `wait_exit` step"
+                    .into(),
+            );
+        }
         only_with("to", self.to.is_some(), &["drag", "drag_slider"])?;
         only_with("to_role", self.to_role.is_some(), &["drag"])?;
         only_with("to_within", self.to_within.is_some(), &["drag"])?;
@@ -1455,6 +1609,8 @@ impl RawStep {
             action,
             hold,
             timeout,
+            typing,
+            fast_forward,
         })
     }
 }

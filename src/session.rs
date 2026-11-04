@@ -42,6 +42,8 @@ pub struct Session<'a> {
     oversized: Vec<String>,
     /// How far recordings' lossy compression may move a color.
     lossy: u8,
+    /// Whether recordings show a badge while a wait is sped up.
+    speed_badge: bool,
     /// The theme being recorded, how overlays look in it, and whether
     /// captions need a band above the frame and below it.
     theme: Theme,
@@ -100,6 +102,7 @@ impl<'a> Session<'a> {
             pointer_shown: false,
             oversized: vec![],
             lossy: story.demo.lossy,
+            speed_badge: story.timing.badge,
             theme,
             look: story.style.look(theme).clone(),
             bands: story.caption_bands(),
@@ -422,6 +425,7 @@ impl<'a> Session<'a> {
     /// recording.
     pub fn start_recording(&mut self, fixed_too: bool) {
         let (size, scale, pane, lossy) = (self.size, self.scale, self.pane_rect(), self.lossy);
+        let speed_badge = self.speed_badge;
         let (theme, (above, below)) = (self.theme, self.bands);
         let look = &self.look;
         let new = || {
@@ -429,6 +433,7 @@ impl<'a> Session<'a> {
             let mut recording = Recording::new(w, h, scale as usize, theme, look);
             recording.set_pane(pane);
             recording.set_lossy(lossy);
+            recording.set_speed_badge(speed_badge);
             if above || below {
                 recording.set_bands(above, below);
             }
@@ -443,9 +448,21 @@ impl<'a> Session<'a> {
         self.recording.iter_mut().chain(self.fixed.iter_mut())
     }
 
-    /// Start a new part of the recording, for size reporting.
-    pub fn mark_segment(&mut self, label: &str) {
-        self.recordings().for_each(|r| r.segment(label));
+    /// Start a new part of the recording, for size reporting. With a
+    /// `budget`, waits in it are sped up as needed to take no longer.
+    pub fn mark_segment(&mut self, label: &str, budget: Option<Duration>) {
+        self.recordings().for_each(|r| r.segment(label, budget));
+    }
+
+    /// Start a wait that recordings may speed up: at `speed`, or with
+    /// `None`, as fast as the part's budget needs.
+    pub fn wait_started(&mut self, speed: Option<u32>) {
+        self.recordings().for_each(|r| r.wait_started(speed));
+    }
+
+    /// End the wait started last.
+    pub fn wait_ended(&mut self) {
+        self.recordings().for_each(|r| r.wait_ended());
     }
 
     /// Caption what is recorded from now on at `position`, or stop with

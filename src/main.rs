@@ -737,6 +737,14 @@ fn report(name: &str, steps: usize, written: &matinee::record::Written) {
             part.label
         );
     }
+    for over in &written.over_budget {
+        eprintln!(
+            "matinee: warning: {name}: \"{}\" takes {:.1} s, over its {:.1} s budget even \
+             with waits at their fastest; {:.1} s of it is typing, holds, motion, short \
+             waits, and waits at their own speed, which the budget cannot shorten",
+            over.label, over.seconds, over.budget, over.fixed
+        );
+    }
     let budget = if written.camera_moved {
         matinee::record::CAMERA_BUDGET
     } else {
@@ -799,7 +807,7 @@ fn record_story(path: &std::path::Path, story: &Story) -> bool {
                             let steps = runner.perform(story)?;
                             drop(runner);
                             // End on the whole screen, where the loop restarts.
-                            session.mark_segment("end");
+                            session.mark_segment("end", None);
                             session.camera.overview();
                             session.run_for(TAIL)?;
                             let (recording, fixed) =
@@ -834,7 +842,10 @@ fn record_story(path: &std::path::Path, story: &Story) -> bool {
                 match recorded {
                     Ok((steps, written, fixed)) => {
                         report(theme.name(), steps, &written);
-                        if let Some(fixed) = fixed {
+                        if let Some(mut fixed) = fixed {
+                            // The same run, so the same scenes are over
+                            // budget; the warning already printed once.
+                            fixed.over_budget.clear();
                             report(&format!("{} fixed", theme.name()), steps, &fixed);
                         }
                         0

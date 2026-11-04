@@ -165,6 +165,56 @@ Colors are `#rrggbb`. Text on a highlight's label or number is dark or white,
 whichever reads on its color. Without `text_size`, text is sized from the
 frame's width; captions do not wrap, so check that long ones still fit.
 
+## Timing
+
+A `run`, staged, or playback command line types one character per frame,
+but never takes longer than 4 seconds: a long line puts several
+characters on each frame. Half a second passes before it runs, so viewers
+can read it. `type` and `key` steps send real keys to a program, one
+every second frame at the default 15 frames a second, so viewers can watch
+each one land.
+
+```toml
+[timing]
+typing = "0.8s"    # the longest a command line takes; "instant" shows it at once
+budget = "10s"     # the longest a scene may take in a recording; off by default
+badge = false      # hide the speed badge; it shows by default
+```
+
+A step can set its own `typing`, such as `{ run = "make", typing = "instant" }`.
+
+A recording can speed up waiting, so a slow build or download does not
+play in real time. Only waits are sped up: a command running, `wait_exit`,
+`wait_for`, and `expect`. Typing, holds, and the pointer and camera moving
+always keep their time. The run itself is never sped up; `matinee run` and
+`--view` show real time, and only the GIF is shorter.
+
+Nothing is sped up unless a story asks. A scene's `budget` is the longest
+the scene may take in the GIF:
+
+```toml
+[[scene]]
+caption = "Build the release"
+budget = "6s"
+steps = [
+  { run = "cargo build --release", timeout = "300s" },
+  { hold = "1.5s" },
+]
+```
+
+When a scene would take longer, its waits play 2, 4, 8, 16, or 32 times
+faster, the slowest of those that fits, the same for every wait in the
+scene. Waits of a second or less keep their time. A badge such as `▶▶ 8×`
+shows while a wait is sped up. When even 32 times is not enough, or typing
+and holds alone take longer than the budget, `matinee record` warns and
+says how much of the scene can never be sped up. `[timing] budget` gives
+every scene a budget; a scene's `budget = "off"` opts it out.
+
+A step can also set its own speed with `fast_forward = "8x"`, from `"2x"`
+to `"32x"`, with or without a budget, or keep real time with
+`fast_forward = "off"`. On a `run` that does not wait, put it on the
+`wait_exit` step. The badge sits at the bottom right, like key badges.
+
 ## Camera and output
 
 `[camera]` supports `mode = "auto"` or `"fixed"`, `max_zoom`, `ease`, and

@@ -1,6 +1,6 @@
 ---
 name: matinee
-description: Write, check, and record matinee storyboards, scripted demos that matinee performs against a real program on Linux or Windows and records as light and dark GIFs for a README, with captions, highlights, and annotated stills for docs. Use when the user wants a demo GIF, screencast, README recording, or step-by-step screenshots of a terminal tool, a desktop app, or both; when they say "record a demo", "storyboard", "matinee", "re-record the GIF", "highlight", or "the demo is out of date"; and when a matinee run fails and needs diagnosing. Covers the storyboard TOML, targeting controls by accessible name, terminal staging, the camera and zoom, captions and highlights, Windows sessions and --screen, and the check, probe, run, record loop.
+description: Write, check, and record matinee storyboards, scripted demos that matinee performs against a real program on Linux or Windows and records as light and dark GIFs for a README, with captions, highlights, and annotated stills for docs. Use when the user wants a demo GIF, screencast, README recording, or step-by-step screenshots of a terminal tool, a desktop app, or both; when they say "record a demo", "storyboard", "matinee", "re-record the GIF", "highlight", "the demo is too slow", "speed up", or "the demo is out of date"; and when a matinee run fails and needs diagnosing. Covers the storyboard TOML, targeting controls by accessible name, terminal staging, the camera and zoom, captions and highlights, typing pace and sped-up waits with scene time budgets, Windows sessions and --screen, and the check, probe, run, record loop.
 ---
 
 # matinee
@@ -108,6 +108,11 @@ wait_for = "="                  # an accessible name that shows the app is ready
 [captions]                      # optional
 # position = "bottom"           # "top", "auto", or a band: "below", "above"
 
+[timing]                        # optional
+# typing = "4s"                 # longest a command line takes; or "instant"
+# budget = "10s"                # longest each scene may take; off by default
+# badge = true                  # the speed badge while a wait is sped up
+
 [style]                         # optional; each key defaults to today's look
 # accent = "#f59e0b"            # highlights, their labels, and numbers
 # ripple = "#3b82f6"            # click ripples
@@ -122,6 +127,7 @@ wait_for = "="                  # an accessible name that shows the app is ready
 [[scene]]
 caption = "Add two numbers"     # optional, shown during the scene
 # caption_position = "top"      # this scene's, in place of [captions]
+# budget = "6s"                 # this scene's, in place of [timing]; or "off"
 steps = [
   { click = "7" },
   { click = "+" },
@@ -203,6 +209,15 @@ program, start it with `{ run = "my-prompt", wait = false }`, send `type` and
 `key` steps with `in = "terminal"`, and finish with
 `{ wait_exit = "my-prompt" }`. Only one command can be left running.
 
+**Timing.** Command lines type one character per frame, within 4 s (or
+`typing`), then pause half a second before running; a step's
+`typing = "instant"` shows one at once. `type` and `key` send a key every
+second frame at 15 fps, so each is visible. A scene's `budget` speeds up its waits (a command running,
+`wait_exit`, `wait_for`, `expect`) by 2× to 32×, the slowest that fits, with
+a `▶▶ 8×` badge; typing, holds, and motion keep their time, and waits of a
+second or less are left alone. A step's `fast_forward = "8x"` or `"off"`
+overrides its scene. Only the GIF is shorter: the run is real time.
+
 ## Rules for a truthful demo
 
 - Stage only what surrounds the demoed program: commands that would need an
@@ -211,6 +226,9 @@ program, start it with `{ run = "my-prompt", wait = false }`, send `type` and
 - Seed every piece of data the demo shows. Don't depend on the user's files,
   accounts, or anything outside the project.
 - End scenes on an assertion that proves the result, not only on a `hold`.
+- When the demoed program itself is slow, give its scene a `budget` rather
+  than faking a faster result. Keep the speed badge unless the user asks to
+  hide it: it tells viewers the wait was sped up.
 - Live clocks stay live. Don't try to freeze time; "updated 3s ago" ticking is
   expected, and recordings are not byte-identical between runs.
 
@@ -270,7 +288,8 @@ runs only when the user is logged on.
 `record` prints each scene's seconds and kilobytes, and how much came while
 the camera moved. It warns above 5 MiB per theme with a moving camera, or
 2 MiB with a fixed one. Camera moves are the biggest cost; to shrink a GIF,
-cut moves, shorten holds, or lower `max_zoom` before raising `lossy`. The
+cut moves, shorten holds, give slow scenes a `budget`, or lower `max_zoom`
+before raising `lossy`. The
 camera zooms no further than `scale`, so a story that needs close-ups sets
 `scale = 2`. A story
 meant for narrow screens sets a smaller `reading_width` and a larger

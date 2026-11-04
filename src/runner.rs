@@ -19,13 +19,20 @@
 //! step types the command it shows and runs the one it names. A `run` with
 //! `wait = false` leaves its command running, for `type` and `key` steps to
 //! send it keys, and checks its status at `wait_exit` or the story's end.
+//!
+//! A command line is typed one character per frame, but never takes longer
+//! than the story's `typing` time: a long line puts several characters on
+//! each frame. Keys sent to a program, by `type` and `key`, go every second
+//! frame at 15 fps, so viewers can watch each land. Waiting for a command,
+//! `wait_for`, and `expect` are marked as waits, which recordings may speed
+//! up.
 
 use crate::{
     camera::Rect as CameraRect,
     keys,
     platform::{A11y, App, Button, Node, in_points},
     session::Session,
-    story::{Action, CameraMove, Mark, Spot, Step, Story, Target},
+    story::{Action, CameraMove, FastForward, Mark, Spot, Step, Story, Target, Typing},
 };
 use std::{
     collections::HashSet,
@@ -49,14 +56,16 @@ const MARK_IN: Duration = Duration::from_millis(300);
 const DRAG: Duration = Duration::from_millis(900);
 /// The pause on the drop target before letting go, so the app sees it.
 const DROP_HOVER: Duration = Duration::from_millis(150);
-/// The time between typed characters.
+/// The time between keys sent to a program: two frames at the usual 15
+/// frames a second, slow enough to watch each key land.
 const PER_KEY: Duration = Duration::from_millis(70);
 /// How long an app may take to show its first window.
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long a terminal command may run by default.
 const RUN_TIMEOUT: Duration = Duration::from_secs(30);
-/// The pause between typing a command line and pressing Enter.
-const BEFORE_ENTER: Duration = Duration::from_millis(250);
+/// The pause between typing a command line and pressing Enter, long
+/// enough to read the line.
+const BEFORE_ENTER: Duration = Duration::from_millis(500);
 
 /// Why a story could not be performed.
 #[derive(Debug)]
@@ -102,6 +111,10 @@ pub struct Runner<'r, 'b> {
     /// A command left running in the terminal.
     running: Option<Running>,
     step_at: (usize, usize),
+    /// How command lines are typed, unless a step says otherwise.
+    typing: Typing,
+    /// The time between frames.
+    period: Duration,
 }
 
 /// A command a `run` step started without waiting for it.
@@ -123,6 +136,8 @@ impl<'r, 'b> Runner<'r, 'b> {
             pointer: (w as f64 / 2.0, h as f64 / 2.0),
             running: None,
             step_at: (0, 0),
+            typing: story.timing.typing,
+            period: Duration::from_secs(1) / story.demo.fps,
         })
     }
 
@@ -189,7 +204,7 @@ impl<'r, 'b> Runner<'r, 'b> {
                 Some(caption) => format!("scene {}: {caption}", si + 1),
                 None => format!("scene {}", si + 1),
             };
-            self.session.mark_segment(&label);
+            self.session.mark_segment(&label, scene.budget);
             let position = story.caption_position(scene);
             self.session.caption(scene.caption.as_deref(), position);
             for (ti, step) in scene.steps.iter().enumerate() {
@@ -204,10 +219,11 @@ impl<'r, 'b> Runner<'r, 'b> {
             self.session.clear_highlights();
         }
         if self.running.is_some() {
-            self.wait_exit(RUN_TIMEOUT).map_err(|message| Failure {
-                at: "end of story".into(),
-                message,
-            })?;
+            self.waiting(None, |r| r.wait_exit(RUN_TIMEOUT))
+                .map_err(|message| Failure {
+                    at: "end of story".into(),
+                    message,
+                })?;
         }
         Ok(done)
     }
@@ -221,7 +237,8 @@ impl<'r, 'b> Runner<'r, 'b> {
                 } else {
                     EXPECT_TIMEOUT
                 };
-                self.wait_until(target, step.timeout.unwrap_or(timeout), true)?;
+                let timeout = step.timeout.unwrap_or(timeout);
+                self.waiting(step.fast_forward, |r| r.wait_until(target, timeout, true))?;
                 self.session
                     .save_artifact(&format!(
                         "scene-{}-step-{}.png",
@@ -340,7 +357,7 @@ impl<'r, 'b> Runner<'r, 'b> {
                 // What a command causes is usually elsewhere on screen.
                 let moved = self.session.camera.overview();
                 self.settle_camera(moved).map_err(io)?;
-                self.type_command(shown.as_deref().unwrap_or(command))?;
+                self.type_command(shown.as_deref().unwrap_or(command), step.typing)?;
                 let terminal = self.terminal()?;
                 terminal.run(command).map_err(io)?;
                 self.running = Some(Running {
@@ -349,7 +366,8 @@ impl<'r, 'b> Runner<'r, 'b> {
                     status: None,
                 });
                 if *wait {
-                    self.wait_exit(step.timeout.unwrap_or(RUN_TIMEOUT))?;
+                    let timeout = step.timeout.unwrap_or(RUN_TIMEOUT);
+                    self.waiting(step.fast_forward, |r| r.wait_exit(timeout))?;
                 } else {
                     self.session.tick().map_err(io)?;
                 }
@@ -358,14 +376,15 @@ impl<'r, 'b> Runner<'r, 'b> {
                 if self.running.is_none() {
                     return Err("no command is running".into());
                 }
-                self.wait_exit(step.timeout.unwrap_or(RUN_TIMEOUT))?;
+                let timeout = step.timeout.unwrap_or(RUN_TIMEOUT);
+                self.waiting(step.fast_forward, |r| r.wait_exit(timeout))?;
             }
             Action::Playback { shown, output } => {
                 let text = std::fs::read_to_string(self.session.story_dir().join(output))
                     .map_err(|e| format!("{}: {e}", output.display()))?;
                 let moved = self.session.camera.overview();
                 self.settle_camera(moved).map_err(io)?;
-                self.type_command(shown)?;
+                self.type_command(shown, step.typing)?;
                 let terminal = self.terminal()?;
                 terminal.show(&text.replace('\n', "\r\n"));
                 terminal.prompt();
@@ -559,17 +578,48 @@ impl<'r, 'b> Runner<'r, 'b> {
             .ok_or_else(|| "this story has no terminal pane".to_string())
     }
 
-    /// Type a command line into the terminal pane, then press Enter.
-    fn type_command(&mut self, line: &str) -> Result<(), String> {
+    /// Run `wait` as a wait recordings may speed up: at the step's
+    /// `fast_forward` speed, or else as the scene's budget needs. With
+    /// `fast_forward = "off"`, it stays in real time.
+    fn waiting<T>(
+        &mut self,
+        fast_forward: Option<FastForward>,
+        wait: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let speed = match fast_forward {
+            Some(FastForward::Off) => return wait(self),
+            Some(FastForward::Times(n)) => Some(n),
+            None => None,
+        };
+        self.session.wait_started(speed);
+        let result = wait(self);
+        self.session.wait_ended();
+        result
+    }
+
+    /// Type a command line into the terminal pane as `typing` says, or
+    /// else as the story does, then press Enter.
+    fn type_command(&mut self, line: &str, typing: Option<Typing>) -> Result<(), String> {
         let io = |e: io::Error| e.to_string();
-        for c in line.chars() {
-            let text = if c == '\n' {
-                "\r\n> ".to_string()
-            } else {
-                c.to_string()
-            };
-            self.terminal()?.show(&text);
-            self.session.run_for(PER_KEY).map_err(io)?;
+        let chars: Vec<String> = line
+            .chars()
+            .map(|c| {
+                if c == '\n' {
+                    "\r\n> ".to_string()
+                } else {
+                    c.to_string()
+                }
+            })
+            .collect();
+        let frames = typing_frames(chars.len(), typing.unwrap_or(self.typing), self.period);
+        // Spread the characters evenly over the frames.
+        for frame in 0..frames {
+            let (from, to) = (
+                frame * chars.len() / frames,
+                (frame + 1) * chars.len() / frames,
+            );
+            self.terminal()?.show(&chars[from..to].concat());
+            self.session.tick().map_err(io)?;
         }
         self.session.run_for(BEFORE_ENTER).map_err(io)?;
         self.terminal()?.show("\r\n");
@@ -1078,9 +1128,38 @@ fn ambiguous(target: &Target, trees: &[(App, Vec<Node>)], several: &[(usize, usi
     out
 }
 
+/// How many frames typing `chars` characters takes, `period` apart: one
+/// per character, but no more than fit in the typing time, and one for a
+/// line typed at once.
+fn typing_frames(chars: usize, typing: Typing, period: Duration) -> usize {
+    match typing {
+        Typing::Instant => 1,
+        Typing::Within(time) => {
+            let most = (time.as_secs_f64() / period.as_secs_f64()).round() as usize;
+            chars.min(most).max(1)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_lines_type_a_character_a_frame_within_the_typing_time() {
+        let period = Duration::from_secs(1) / 15;
+        let within = Typing::Within(Duration::from_millis(1200));
+        // Short lines get a frame a character; long ones share 18 frames.
+        assert_eq!(typing_frames(12, within, period), 12);
+        assert_eq!(typing_frames(80, within, period), 18);
+        assert_eq!(typing_frames(0, within, period), 1);
+        assert_eq!(typing_frames(80, Typing::Instant, period), 1);
+        // A time shorter than a frame still takes one.
+        assert_eq!(
+            typing_frames(5, Typing::Within(Duration::from_millis(10)), period),
+            1
+        );
+    }
 
     #[test]
     fn a_trailing_star_matches_by_prefix() {

@@ -10,6 +10,13 @@
 //! shares one palette, chosen from how long each color is on screen. Frames
 //! are compressed with slight loss (see [`crate::lzw`]), and the size of
 //! each part of the recording, such as a scene, is reported.
+//!
+//! Waits, such as a command running, can be sped up: when the GIF is
+//! written, only every few ticks of a wait are kept, and a badge shows the
+//! speed. A wait is sped up when its step asks for a speed, or when its
+//! scene has a time budget it would otherwise go over. Everything else,
+//! typing, holds, and the pointer and camera moving, keeps its time. The
+//! session itself always runs in real time.
 
 use crate::{
     camera::Rect,
@@ -17,7 +24,7 @@ use crate::{
     lzw,
     overlay::{self, Events, Layout, Painter, Shown},
     palette::{self, Histogram, Nearest},
-    story::{CaptionPosition, HighlightStyle, Look, Theme},
+    story::{BUDGET_FLOOR, CaptionPosition, HighlightStyle, Look, MAX_SPEED, Theme},
 };
 use std::{
     borrow::Cow,
@@ -80,9 +87,16 @@ pub struct Recording {
     pane: Option<Rect>,
     /// How far lossy compression may move a color; 0 is exact.
     lossy: u8,
-    /// Where each part of the recording starts, by tick, and its name:
-    /// the lead-in, each scene, and the end. Sizes are reported per part.
-    segments: Vec<(usize, String)>,
+    /// Where each part of the recording starts, by tick, its name, and
+    /// the time it may take: the lead-in, each scene, and the end. Sizes
+    /// are reported per part.
+    segments: Vec<(usize, String, Option<f64>)>,
+    /// Waits that may be sped up, by tick.
+    waits: Vec<Wait>,
+    /// A wait that has started and not yet ended.
+    waiting: Option<(usize, Option<u32>)>,
+    /// Whether a badge shows while a wait is sped up.
+    speed_badge: bool,
     /// Ticks to save as still pictures.
     stills: Vec<usize>,
     /// The theme being recorded, and how overlays look in it.
@@ -104,6 +118,50 @@ pub const LOSSY: u8 = 6;
 /// The palette index left for transparency, after the clip's 255 colors.
 const TRANSPARENT: u8 = 255;
 
+/// A stretch of ticks spent waiting, from `start` up to `end`, played at
+/// `speed` when its step set one, or else as its scene's budget needs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Wait {
+    start: usize,
+    end: usize,
+    speed: Option<u32>,
+}
+
+/// Which ticks a recording keeps, and how fast each wait plays.
+#[derive(Debug, Default, PartialEq)]
+struct Plan {
+    /// The ticks kept, in order.
+    kept: Vec<usize>,
+    /// Each sped-up wait: its first kept index, the kept index after its
+    /// last, and its speed.
+    speeds: Vec<(usize, usize, u32)>,
+    /// Scenes that are longer than their budget even at the fastest speed.
+    over: Vec<OverBudget>,
+}
+
+/// A part of a recording that could not be sped up to fit its budget.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OverBudget {
+    pub label: String,
+    /// Its budget, in seconds.
+    pub budget: f64,
+    /// How long it takes as recorded, and the part of that which is never
+    /// sped up: typing, holds, motion, and short waits.
+    pub seconds: f64,
+    pub fixed: f64,
+}
+
+/// How many ticks of a wait `len` ticks long are kept at `speed`: every
+/// `speed`th from the first, and always the last, so the result shows on
+/// time.
+fn kept_of(len: usize, speed: u32) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let speed = speed.max(1) as usize;
+    (len - 1) / speed + 1 + usize::from(!(len - 1).is_multiple_of(speed))
+}
+
 /// What was written.
 pub struct Written {
     pub bytes: u64,
@@ -114,6 +172,8 @@ pub struct Written {
     pub camera_moved: bool,
     /// The size of each part of the recording, in order.
     pub segments: Vec<SegmentSize>,
+    /// Parts that are over their time budget even with waits sped up.
+    pub over_budget: Vec<OverBudget>,
 }
 
 /// What one part of a recording, such as a scene, cost.
@@ -162,7 +222,10 @@ impl Recording {
             events: Events::default(),
             pane: None,
             lossy: LOSSY,
-            segments: vec![(0, "start".into())],
+            segments: vec![(0, "start".into(), None)],
+            waits: vec![],
+            waiting: None,
+            speed_badge: true,
             stills: vec![],
             theme,
             look: look.clone(),
@@ -191,10 +254,126 @@ impl Recording {
         self.pane = pane;
     }
 
+    /// Show a badge while a wait is sped up, or not.
+    pub fn set_speed_badge(&mut self, shown: bool) {
+        self.speed_badge = shown;
+    }
+
     /// Start a new part of the recording, named `label`, from the next
-    /// tick, for size reporting.
-    pub fn segment(&mut self, label: &str) {
-        self.segments.push((self.ticks.len(), label.into()));
+    /// tick, for size reporting. With a `budget`, waits in it are sped up
+    /// as far as needed for it to take no longer.
+    pub fn segment(&mut self, label: &str, budget: Option<std::time::Duration>) {
+        self.segments.push((
+            self.ticks.len(),
+            label.into(),
+            budget.map(|b| b.as_secs_f64()),
+        ));
+    }
+
+    /// Start a wait from the next tick, played at `speed` or, with
+    /// `None`, as fast as its part's budget needs.
+    pub fn wait_started(&mut self, speed: Option<u32>) {
+        self.waiting = Some((self.ticks.len(), speed));
+    }
+
+    /// End the wait started last, after the last tick so far.
+    pub fn wait_ended(&mut self) {
+        if let Some((start, speed)) = self.waiting.take() {
+            let end = self.ticks.len();
+            if end > start {
+                self.waits.push(Wait { start, end, speed });
+            }
+        }
+    }
+
+    /// Which ticks to keep at `fps`, and how fast each wait plays.
+    fn plan(&self, fps: u32) -> Plan {
+        let ticks = self.ticks.len();
+        // The speed each wait plays at; 1 is real time.
+        let mut speeds: Vec<u32> = self.waits.iter().map(|w| w.speed.unwrap_or(1)).collect();
+        let mut over = vec![];
+        let floor = (BUDGET_FLOOR.as_secs_f64() * fps as f64).round() as usize;
+        for (s, (start, label, budget)) in self.segments.iter().enumerate() {
+            let Some(budget) = budget else { continue };
+            let end = self.segments.get(s + 1).map_or(ticks, |next| next.0);
+            let budget_ticks = (budget * fps as f64).round() as usize;
+            // Waits in this part that the budget may speed up, and the
+            // ticks that stay whatever it does.
+            let mut free = vec![];
+            let mut fixed = end.saturating_sub(*start);
+            for (i, w) in self.waits.iter().enumerate() {
+                if w.start < *start || w.start >= end {
+                    continue;
+                }
+                let len = w.end.min(end) - w.start;
+                match w.speed {
+                    Some(speed) => fixed = fixed - len + kept_of(len, speed),
+                    None if len > floor => {
+                        fixed -= len;
+                        free.push((i, len));
+                    }
+                    None => {}
+                }
+            }
+            let length = |speed: u32| {
+                fixed
+                    + free
+                        .iter()
+                        .map(|&(_, len)| kept_of(len, speed))
+                        .sum::<usize>()
+            };
+            if length(1) <= budget_ticks {
+                continue;
+            }
+            let speed = std::iter::successors(Some(2u32), |s| Some(s * 2))
+                .take_while(|&s| s <= MAX_SPEED)
+                .find(|&s| length(s) <= budget_ticks);
+            let speed = speed.unwrap_or_else(|| {
+                let at_max = if free.is_empty() {
+                    length(1)
+                } else {
+                    length(MAX_SPEED)
+                };
+                over.push(OverBudget {
+                    label: label.clone(),
+                    budget: *budget,
+                    seconds: at_max as f64 / fps as f64,
+                    fixed: fixed as f64 / fps as f64,
+                });
+                MAX_SPEED
+            });
+            for (i, _) in free {
+                speeds[i] = speed;
+            }
+        }
+
+        // Keep every tick outside waits, and every `speed`th one inside,
+        // with each wait's last.
+        let mut kept = Vec::with_capacity(ticks);
+        let mut shown_speeds = vec![];
+        let mut next = 0;
+        let mut waits: Vec<(Wait, u32)> = self.waits.iter().copied().zip(speeds).collect();
+        waits.sort_by_key(|(w, _)| w.start);
+        for (w, speed) in waits {
+            let (start, end) = (w.start.max(next), w.end.min(ticks));
+            if start >= end {
+                continue;
+            }
+            kept.extend(next..start);
+            let first = kept.len();
+            let step = speed.max(1) as usize;
+            kept.extend((start..end).filter(|t| (t - start) % step == 0 || *t == end - 1));
+            if speed > 1 {
+                shown_speeds.push((first, kept.len(), speed));
+            }
+            next = end;
+        }
+        kept.extend(next..ticks);
+        Plan {
+            kept,
+            speeds: shown_speeds,
+            over,
+        }
     }
 
     /// Caption the ticks from the next one on at `position`, or stop with
@@ -269,13 +448,28 @@ impl Recording {
         self.views.push(view);
     }
 
-    /// What the overlays show on each tick.
-    fn shown(&self, fps: u32) -> Vec<Shown> {
-        let pointer = |i: usize| self.ticks.get(i).and_then(|t| t.1);
+    /// The overlays' events, timed in `plan`'s kept ticks so fades last as
+    /// long at any speed, with a badge on each sped-up wait.
+    fn events(&self, plan: &Plan) -> Events {
+        // A tick's place among the kept ones; a dropped tick's is that of
+        // the next one kept.
+        let mut events = self
+            .events
+            .remap(|tick| plan.kept.partition_point(|&k| k < tick));
+        if self.speed_badge {
+            events.set_speeds(&plan.speeds);
+        }
+        events
+    }
+
+    /// What the overlays show on each of `plan`'s kept ticks.
+    fn shown(&self, plan: &Plan, events: &Events, fps: u32) -> Vec<Shown> {
+        let kept = &plan.kept;
+        let pointer = |i: usize| kept.get(i).and_then(|&t| self.ticks[t].1);
         let (w, h, top) = (self.width, self.frame_height, self.band_above as i32);
-        (0..self.ticks.len())
+        (0..kept.len())
             .map(|i| {
-                let view = self.views[i];
+                let view = self.views[kept[i]];
                 let (ax, ay, aw, ah) = overlay::free_area(view, self.pane, w, h);
                 // Where a rectangle on the screen lands in the output.
                 let map = |r: Rect| {
@@ -290,23 +484,28 @@ impl Recording {
                     area: (ax, ay + top, aw, ah),
                     map: &map,
                 };
-                self.events
-                    .shown(i, self.ticks.len(), fps, pointer, &layout)
+                events.shown(i, kept.len(), fps, pointer, &layout)
             })
             .collect()
     }
 
     /// The still pictures asked for, with their overlays, in order.
     pub fn stills(&self, fps: u32) -> Vec<Frame> {
-        let shown = self.shown(fps);
+        let plan = self.plan(fps);
+        let events = self.events(&plan);
+        let shown = self.shown(&plan, &events, fps);
         self.stills
             .iter()
             .map(|&tick| {
-                let (image, pointer) = self.ticks[tick];
+                let at = plan
+                    .kept
+                    .partition_point(|&k| k < tick)
+                    .min(plan.kept.len() - 1);
+                let (image, pointer) = self.ticks[plan.kept[at]];
                 Frame {
                     width: self.width,
                     height: self.height,
-                    pixels: self.compose(image, pointer, &shown[tick].settled()),
+                    pixels: self.compose(image, pointer, &shown[at].settled(), &events),
                 }
             })
             .collect()
@@ -314,8 +513,10 @@ impl Recording {
 
     /// Write the recording as a looping GIF, at `fps` ticks per second.
     pub fn write_gif(&self, path: &Path, fps: u32) -> io::Result<Written> {
+        let plan = self.plan(fps);
+        let events = self.events(&plan);
+        let shown = self.shown(&plan, &events, fps);
         // Runs of ticks that look the same become one frame.
-        let shown = self.shown(fps);
         let mut runs: Vec<((Tick, Shown), usize)> = vec![];
         // For each run, the part of the recording it starts in, and whether
         // the camera moved during it.
@@ -323,13 +524,13 @@ impl Recording {
         let segment_of = |tick: usize| {
             self.segments
                 .iter()
-                .rposition(|&(start, _)| start <= tick)
+                .rposition(|&(start, _, _)| start <= tick)
                 .unwrap_or(0)
         };
         let mut kept_moving = false;
-        for (i, &tick) in self.ticks.iter().enumerate() {
+        for (k, &i) in plan.kept.iter().enumerate() {
             let moving = self.moving[i];
-            let tick = (tick, shown[i].clone());
+            let tick = (self.ticks[i], shown[k].clone());
             match runs.last_mut() {
                 Some((last, n)) if *last == tick => *n += 1,
                 // While the camera moves, every other frame is kept: a move
@@ -352,7 +553,10 @@ impl Recording {
             return Err(io::Error::other("nothing was recorded"));
         }
 
-        let colors = palette::quantize(&self.histogram(&runs), TRANSPARENT as usize);
+        let colors = palette::quantize(
+            &self.histogram(&plan.kept, &runs, &events),
+            TRANSPARENT as usize,
+        );
         let nearest = Nearest::new(&colors);
         let mut palette: Vec<u8> = colors
             .iter()
@@ -375,7 +579,7 @@ impl Recording {
         let mut sizes: Vec<SegmentSize> = self
             .segments
             .iter()
-            .map(|(_, label)| SegmentSize {
+            .map(|(_, label, _)| SegmentSize {
                 label: label.clone(),
                 seconds: 0.0,
                 bytes: 0,
@@ -422,7 +626,7 @@ impl Recording {
         let mut written_cs = 0u32;
         let mut frames = 0;
         for ((((image, pointer), shown), n), this) in runs.into_iter().zip(about) {
-            let pixels = self.compose(image, pointer, &shown);
+            let pixels = self.compose(image, pointer, &shown, &events);
             let indexed: Vec<u8> = pixels.iter().map(|&p| index(p)).collect();
             ticks_done += n;
             // Delays are whole centiseconds; rounding the running total
@@ -516,16 +720,22 @@ impl Recording {
             seconds: written_cs as f64 / 100.0,
             camera_moved: self.moving.iter().any(|&m| m),
             segments: sizes,
+            over_budget: plan.over,
         })
     }
 
     /// Every color the clip shows, weighted by how long it is on screen:
     /// pixels times ticks. Counts change only where an image differs from
     /// the one before, so this stays quick for long clips.
-    fn histogram(&self, runs: &[((Tick, Shown), usize)]) -> Histogram {
+    fn histogram(
+        &self,
+        kept: &[usize],
+        runs: &[((Tick, Shown), usize)],
+        events: &Events,
+    ) -> Histogram {
         let mut shown_for = vec![0u64; self.images.len()];
-        for &(image, _) in &self.ticks {
-            shown_for[image] += 1;
+        for &i in kept {
+            shown_for[self.ticks[i].0] += 1;
         }
         let mut weights = Histogram::new();
         // For each color on screen: how many pixels, and the tick its
@@ -575,7 +785,7 @@ impl Recording {
         }
         for (shown, (image, ticks)) in looks {
             let mut pixels = self.images[image].clone();
-            if let Some((x, y, w, h)) = self.painter.draw(&mut pixels, shown, &self.events) {
+            if let Some((x, y, w, h)) = self.painter.draw(&mut pixels, shown, events) {
                 for row in y..y + h {
                     for &c in &pixels[row * self.width + x..row * self.width + x + w] {
                         *weights.entry(c).or_insert(0) += ticks;
@@ -584,7 +794,7 @@ impl Recording {
             }
         }
         // The pointer's black and white, for as long as it shows.
-        let pointer = self.ticks.iter().filter(|t| t.1.is_some()).count() as u64;
+        let pointer = kept.iter().filter(|&&i| self.ticks[i].1.is_some()).count() as u64;
         let arrow = ARROW.iter().map(|r| r.len() as u64).sum::<u64>();
         for c in [0x000000, 0xffffff] {
             *weights.entry(c).or_insert(0) += pointer * arrow / 2;
@@ -593,10 +803,16 @@ impl Recording {
     }
 
     /// An app image with the overlays and the pointer drawn on it.
-    fn compose(&self, image: usize, pointer: Option<(i32, i32)>, shown: &Shown) -> Vec<u32> {
+    fn compose(
+        &self,
+        image: usize,
+        pointer: Option<(i32, i32)>,
+        shown: &Shown,
+        events: &Events,
+    ) -> Vec<u32> {
         let mut pixels = self.images[image].clone();
         if !shown.is_empty() {
-            self.painter.draw(&mut pixels, shown, &self.events);
+            self.painter.draw(&mut pixels, shown, events);
         }
         if let Some(at) = pointer {
             draw_pointer(&mut pixels, (self.width, self.height), at, 0);
@@ -932,13 +1148,13 @@ mod tests {
             &Look::default_for(crate::story::Theme::Light),
         );
         rec.add(&frame(20, 20, 0xff102030), all(), None);
-        rec.segment("scene 1");
+        rec.segment("scene 1", None);
         for _ in 0..15 {
             rec.add(&frame(20, 20, 0xffa0b0c0), all(), None);
         }
         // A scene with no frames of its own is left out.
-        rec.segment("scene 2");
-        rec.segment("end");
+        rec.segment("scene 2", None);
+        rec.segment("end", None);
         for _ in 0..15 {
             rec.add(
                 &frame(20, 20, 0xffffffff),
@@ -959,6 +1175,126 @@ mod tests {
         assert_eq!(written.segments[1].seconds, 1.0);
         assert_eq!(written.segments[1].camera_bytes, 0);
         assert!(written.segments[2].camera_bytes > 0, "the view changed");
+    }
+
+    /// A scene's budget in seconds, then its stretches: each so many ticks
+    /// long and, when waiting, the step's speed.
+    type Part<'a> = (Option<u64>, &'a [(usize, Option<Option<u32>>)]);
+
+    /// A recording of `parts`, one scene each.
+    fn timed(parts: &[Part]) -> Recording {
+        let mut rec = Recording::new(
+            20,
+            20,
+            1,
+            crate::story::Theme::Light,
+            &Look::default_for(crate::story::Theme::Light),
+        );
+        for (n, (budget, stretches)) in parts.iter().enumerate() {
+            let budget = budget.map(std::time::Duration::from_secs);
+            rec.segment(&format!("scene {}", n + 1), budget);
+            for &(ticks, wait) in stretches.iter() {
+                if let Some(speed) = wait {
+                    rec.wait_started(speed);
+                }
+                for _ in 0..ticks {
+                    rec.add(&frame(20, 20, 0xff102030), all(), None);
+                }
+                if wait.is_some() {
+                    rec.wait_ended();
+                }
+            }
+        }
+        rec
+    }
+
+    #[test]
+    fn kept_ticks_include_the_first_and_last_of_a_wait() {
+        assert_eq!(kept_of(0, 4), 0);
+        assert_eq!(kept_of(1, 4), 1);
+        assert_eq!(kept_of(9, 4), 3); // 0, 4, 8
+        assert_eq!(kept_of(10, 4), 4); // 0, 4, 8, 9
+        assert_eq!(kept_of(10, 1), 10);
+    }
+
+    #[test]
+    fn a_scene_over_its_budget_plays_its_waits_at_the_slowest_speed_that_fits() {
+        // 2 s of typing and holds and a 10 s wait, in a 5 s budget: 2× would
+        // take 7.1 s, 4× takes 4.6 s.
+        let rec = timed(&[(Some(5), &[(10, None), (100, Some(None)), (10, None)])]);
+        let plan = rec.plan(10);
+        assert_eq!(plan.speeds, [(10, 36, 4)]);
+        assert_eq!(plan.kept.len(), 46);
+        assert!(plan.kept.contains(&109), "the wait's last tick is kept");
+        assert!(plan.kept.contains(&110), "what follows keeps its time");
+        assert!(plan.over.is_empty());
+    }
+
+    #[test]
+    fn without_a_budget_only_a_step_s_own_speed_applies() {
+        let rec = timed(&[(None, &[(100, Some(None)), (80, Some(Some(8)))])]);
+        let plan = rec.plan(10);
+        assert_eq!(plan.speeds, [(100, 111, 8)]);
+        assert_eq!(plan.kept.len(), 100 + kept_of(80, 8));
+    }
+
+    #[test]
+    fn a_scene_within_its_budget_and_short_waits_keep_their_time() {
+        let rec = timed(&[
+            (Some(10), &[(20, None), (50, Some(None))]),
+            // A budget never speeds up waits of a second or less.
+            (Some(3), &[(30, None), (10, Some(None)), (10, Some(None))]),
+        ]);
+        let plan = rec.plan(10);
+        assert!(plan.speeds.is_empty());
+        assert_eq!(plan.kept.len(), 120);
+        assert_eq!(plan.over.len(), 1);
+        assert_eq!(plan.over[0].label, "scene 2");
+        assert_eq!((plan.over[0].seconds, plan.over[0].fixed), (5.0, 5.0));
+    }
+
+    #[test]
+    fn a_scene_that_cannot_fit_plays_at_the_fastest_and_is_reported() {
+        let rec = timed(&[(Some(2), &[(10, None), (1000, Some(None))])]);
+        let plan = rec.plan(10);
+        assert_eq!(plan.speeds[0].2, MAX_SPEED);
+        let over = &plan.over[0];
+        assert_eq!(over.budget, 2.0);
+        assert_eq!(over.fixed, 1.0);
+        assert!((over.seconds - (10 + kept_of(1000, MAX_SPEED)) as f64 / 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_sped_up_wait_is_shorter_in_the_gif_and_shows_its_badge() {
+        let dir = std::env::temp_dir().join(format!("matinee-gifw-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.gif");
+        let rec = timed(&[(Some(5), &[(10, None), (100, Some(None)), (10, None)])]);
+        let plan = rec.plan(10);
+        let events = rec.events(&plan);
+        let shown = rec.shown(&plan, &events, 10);
+        assert!(shown[9].speed.is_none());
+        assert_eq!(shown[20].speed, Some((4, 8)), "fully in during the wait");
+        assert!(
+            shown[36].speed.is_some_and(|(_, l)| l < 8),
+            "fading after it"
+        );
+        assert!(shown[45].speed.is_none());
+        let written = rec.write_gif(&path, 10).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!((written.seconds - 4.6).abs() < 1e-9, "{}", written.seconds);
+        assert!(written.over_budget.is_empty());
+
+        let mut quiet = timed(&[(Some(5), &[(10, None), (100, Some(None)), (10, None)])]);
+        quiet.set_speed_badge(false);
+        let plan = quiet.plan(10);
+        let events = quiet.events(&plan);
+        assert!(
+            quiet
+                .shown(&plan, &events, 10)
+                .iter()
+                .all(|s| s.speed.is_none())
+        );
     }
 
     #[test]

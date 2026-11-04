@@ -1,7 +1,7 @@
 //! What recordings draw over the app after the camera's crop, at output
 //! size, so it stays crisp at any zoom: the scene's caption, highlights
-//! that mark part of the screen, a ripple where a click lands, and a badge
-//! naming each key chord pressed.
+//! that mark part of the screen, a ripple where a click lands, a badge
+//! naming each key chord pressed, and a badge showing when a wait is sped up.
 //!
 //! The recording keeps when each of these happened, by tick, and works out
 //! what shows on each tick only when it is written, since a caption fades
@@ -71,7 +71,7 @@ pub enum Place {
 
 /// A highlight as recorded: what it marks on the screen, in points, how
 /// it looks, and its first tick and the tick after its last.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Mark {
     rect: Rect,
     style: HighlightStyle,
@@ -84,7 +84,7 @@ struct Mark {
 }
 
 /// What happened during a recording, by tick.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Events {
     /// Each caption's text and place, first tick, and the tick after its
     /// last; the latest has no end until the next one starts.
@@ -92,6 +92,9 @@ pub struct Events {
     marks: Vec<Mark>,
     clicks: Vec<usize>,
     keys: Vec<(String, usize)>,
+    /// Each sped-up wait: its first tick, the tick after its last, and its
+    /// speed.
+    speeds: Vec<(usize, usize, u32)>,
 }
 
 /// A highlight showing on a tick: its index, its rectangle in the output,
@@ -105,6 +108,8 @@ pub struct Shown {
     caption: Option<(usize, u8, Place)>,
     /// A key badge by index, and its opacity out of `LEVELS`.
     badge: Option<(usize, u8)>,
+    /// A sped-up wait's speed, and its badge's opacity out of `LEVELS`.
+    pub(crate) speed: Option<(u32, u8)>,
     /// A ripple's center in the output and how far along it is, out of
     /// `LEVELS`.
     ripple: Option<(i32, i32, u8)>,
@@ -134,6 +139,7 @@ impl Shown {
     pub fn is_empty(&self) -> bool {
         self.caption.is_none()
             && self.badge.is_none()
+            && self.speed.is_none()
             && self.ripple.is_none()
             && self.marks.is_empty()
     }
@@ -195,6 +201,40 @@ impl Events {
 
     pub fn key(&mut self, tick: usize, chord: &str) {
         self.keys.push((badge_label(chord), tick));
+    }
+
+    /// Show a speed badge for each wait: its first tick, the tick after
+    /// its last, and its speed.
+    pub fn set_speeds(&mut self, speeds: &[(usize, usize, u32)]) {
+        self.speeds = speeds.to_vec();
+    }
+
+    /// The same events with every tick moved by `to`, as when ticks are
+    /// dropped from a recording.
+    pub fn remap(&self, to: impl Fn(usize) -> usize) -> Events {
+        Events {
+            captions: self
+                .captions
+                .iter()
+                .map(|(text, place, start, end)| (text.clone(), *place, to(*start), end.map(&to)))
+                .collect(),
+            marks: self
+                .marks
+                .iter()
+                .map(|m| Mark {
+                    start: to(m.start),
+                    end: m.end.map(&to),
+                    ..m.clone()
+                })
+                .collect(),
+            clicks: self.clicks.iter().map(|&t| to(t)).collect(),
+            keys: self.keys.iter().map(|(k, t)| (k.clone(), to(*t))).collect(),
+            speeds: self
+                .speeds
+                .iter()
+                .map(|&(start, end, speed)| (to(start), to(end), speed))
+                .collect(),
+        }
     }
 
     /// What shows on `tick` of `ticks` at `fps`, with the pointer where
@@ -270,6 +310,32 @@ impl Events {
                 (opacity > 0).then_some((i, opacity))
             });
 
+        // Shown through each wait, fading in at its start and out after it.
+        // A wait that starts while the one before is still fading out
+        // keeps the badge at full instead of fading in again, and the most
+        // opaque wait shows, the later one on a tie.
+        let fade = frames(BADGE_FADE) as f64;
+        let speed = self
+            .speeds
+            .iter()
+            .enumerate()
+            .filter(|(_, (start, _, _))| *start <= tick)
+            .map(|(i, &(start, end, speed))| {
+                let continues = i > 0 && self.speeds[i - 1].1 + frames(BADGE_FADE) > start;
+                let opacity = if tick < end {
+                    if continues {
+                        1.0
+                    } else {
+                        ((tick - start + 1) as f64 / fade).min(1.0)
+                    }
+                } else {
+                    1.0 - (tick - end + 1) as f64 / fade
+                };
+                (speed, level(opacity))
+            })
+            .filter(|&(_, opacity)| opacity > 0)
+            .max_by_key(|&(_, opacity)| opacity);
+
         let ripple = self.clicks.iter().rfind(|&&at| at <= tick).and_then(|&at| {
             let length = frames(RIPPLE);
             let since = tick - at;
@@ -283,6 +349,7 @@ impl Events {
         Shown {
             caption,
             badge,
+            speed,
             ripple,
             marks,
             area: layout.area,
@@ -505,6 +572,7 @@ impl Painter {
                 }
             }
         }
+        let mut key_box = None;
         if let Some((i, level)) = shown.badge {
             let text = &events.keys[i].0;
             let size = (self.size * 0.85).round();
@@ -535,6 +603,11 @@ impl Painter {
                 opacity,
             );
             drawn.add(x, y, w, h);
+            key_box = Some((x, y, w, h));
+        }
+        if let Some((speed, level)) = shown.speed {
+            let below = [caption_box, key_box];
+            self.speed_badge(pixels, shown, speed, level, &below, &mut drawn);
         }
         if let Some((cx, cy, step)) = shown.ripple {
             let t = step as f64 / LEVELS as f64;
@@ -671,6 +744,110 @@ impl Painter {
                 self.plate(pixels, &plate, opacity);
                 self.text(pixels, (lx, ly, lw, lh), label, size, on_accent, opacity);
                 drawn.add(lx, ly, lw, lh);
+            }
+        }
+    }
+
+    /// The badge for a wait sped up `speed` times: a fast-forward sign and
+    /// the speed, at the bottom right of the free area like a key badge,
+    /// where a terminal-only story's pane is still empty, and above a
+    /// bottom caption or key badge it would cover.
+    fn speed_badge(
+        &self,
+        pixels: &mut [u32],
+        shown: &Shown,
+        speed: u32,
+        level: u8,
+        below: &[Option<(i32, i32, i32, i32)>],
+        drawn: &mut Bounds,
+    ) {
+        let (ax, ay, aw, ah) = shown.area;
+        let margin = (self.size * 0.6).round() as i32;
+        let size = (self.size * 0.85).round();
+        let text = format!("{speed}×");
+        // Padding, the sign (two triangles, each about as tall as a
+        // capital), a gap, the speed, and padding again.
+        let pad = (size * 0.7).round();
+        let tri_h = (size * 0.7).round();
+        let tri_w = (tri_h * 0.8).round();
+        let gap = (size * 0.35).round();
+        let text_w = self.text_width(&text, size).round();
+        let h = (size * 1.8).round() as i32;
+        let w = (pad + 2.0 * tri_w + gap + text_w + pad) as i32;
+        let x = ax + aw - margin - w;
+        let mut y = ay + ah - margin - h;
+        // Above each box in the lower half it would overlap, in order: the
+        // caption, then a key badge, which already sits above the caption.
+        for &(bx, by, bw, bh) in below.iter().flatten() {
+            let overlaps = x < bx + bw && bx < x + w && y < by + bh && by < y + h;
+            if overlaps && by > ay + ah / 2 {
+                y = by - margin / 2 - h;
+            }
+        }
+        let opacity = level as f64 / LEVELS as f64;
+        let plate = Plate {
+            rect: (x, y, w, h),
+            radius: size as f64 * 0.35,
+            fill: self.look.caption_backing,
+            fill_alpha: self.fixed.backing_alpha,
+            border: Some(self.look.caption_border),
+        };
+        self.plate(pixels, &plate, opacity);
+        let left = x as f64 + pad as f64;
+        let top = y as f64 + (h as f64 - tri_h as f64) / 2.0;
+        for n in 0..2 {
+            self.triangle(
+                pixels,
+                (
+                    left + n as f64 * tri_w as f64,
+                    top,
+                    tri_w as f64,
+                    tri_h as f64,
+                ),
+                self.look.caption_text,
+                opacity,
+            );
+        }
+        let text_x = x + (pad + 2.0 * tri_w + gap) as i32;
+        self.text(
+            pixels,
+            (text_x, y, text_w as i32, h),
+            &text,
+            size,
+            self.look.caption_text,
+            opacity,
+        );
+        drawn.add(x, y, w, h);
+    }
+
+    /// A triangle pointing right, filling `(x, y, w, h)`, smoothed at its
+    /// edges by sampling each pixel.
+    fn triangle(
+        &self,
+        pixels: &mut [u32],
+        (x, y, w, h): (f64, f64, f64, f64),
+        color: u32,
+        opacity: f64,
+    ) {
+        const SAMPLES: usize = 4;
+        let inside = |px: f64, py: f64| {
+            // Right of the left edge, and within the two slanted edges.
+            let t = (px - x) / w;
+            let half = h / 2.0 * (1.0 - t);
+            (0.0..=1.0).contains(&t) && (py - (y + h / 2.0)).abs() <= half
+        };
+        for py in y.floor() as i32..(y + h).ceil() as i32 {
+            for px in x.floor() as i32..(x + w).ceil() as i32 {
+                let mut hits = 0;
+                for sy in 0..SAMPLES {
+                    for sx in 0..SAMPLES {
+                        let fx = px as f64 + (sx as f64 + 0.5) / SAMPLES as f64;
+                        let fy = py as f64 + (sy as f64 + 0.5) / SAMPLES as f64;
+                        hits += usize::from(inside(fx, fy));
+                    }
+                }
+                let cover = hits as f64 / (SAMPLES * SAMPLES) as f64;
+                self.blend(pixels, px, py, color, cover * opacity);
             }
         }
     }
@@ -867,6 +1044,21 @@ mod tests {
         assert_eq!(badge_label("f5"), "F5");
         assert_eq!(badge_label("ctrl+plus"), "Ctrl++");
         assert_eq!(badge_label("backspace"), "Backspace");
+    }
+
+    #[test]
+    fn the_speed_badge_stays_up_between_back_to_back_waits() {
+        let mut events = Events::default();
+        // Two sped-up waits, the second starting as the first ends.
+        events.set_speeds(&[(10, 20, 4), (20, 30, 4)]);
+        let at = |tick| shown_at(&events, tick, 100, 100, 100).speed;
+        assert_eq!(at(9), None);
+        assert!(matches!(at(10), Some((4, l)) if l > 0 && l < LEVELS));
+        assert_eq!(at(19), Some((4, LEVELS)));
+        assert_eq!(at(20), Some((4, LEVELS)));
+        assert_eq!(at(21), Some((4, LEVELS)));
+        assert!(matches!(at(30), Some((4, l)) if l < LEVELS));
+        assert_eq!(at(40), None);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use matinee::story::{
-    Action, CameraMove, CaptionPosition, Highlight, HighlightStyle, Look, Mark, Story, Theme,
-    parse_duration,
+    Action, CameraMove, CaptionPosition, FastForward, Highlight, HighlightStyle, Look, Mark, Story,
+    Theme, Typing, parse_duration,
 };
 use std::{path::PathBuf, time::Duration};
 
@@ -551,4 +551,92 @@ fn style_mistakes_are_named() {
     assert!(style("[style]\nfont = \"Comic\"").contains("unknown field"));
     assert!(error(r##"{ highlight = "Go", color = "red" }"##).contains("color:"));
     assert!(error(r##"{ click = "Go", color = "#ff0000" }"##).contains("`color` only applies"));
+}
+
+fn with_timing(timing: &str, scenes: &str) -> Result<Story, String> {
+    Story::parse(
+        &format!("{HEAD}\n{timing}\n{scenes}"),
+        PathBuf::from("tests"),
+    )
+}
+
+#[test]
+fn typing_is_quick_and_nothing_is_sped_up_by_default() {
+    let story = parse(r#"{ run = "make" }"#).unwrap();
+    assert_eq!(story.timing.typing, Typing::Within(Duration::from_secs(4)));
+    assert!(story.timing.badge);
+    assert_eq!(story.scenes[0].budget, None);
+    let step = &story.scenes[0].steps[0];
+    assert_eq!((step.typing, step.fast_forward), (None, None));
+}
+
+#[test]
+fn timing_sets_typing_budgets_and_the_badge() {
+    let story = with_timing(
+        "[timing]\ntyping = \"instant\"\nbudget = \"10s\"\nbadge = false",
+        "[[scene]]\nsteps = [{ run = \"make\" }]\n\
+         [[scene]]\nbudget = \"4s\"\nsteps = [{ run = \"make\" }]\n\
+         [[scene]]\nbudget = \"off\"\nsteps = [{ run = \"make\" }]\n",
+    )
+    .unwrap();
+    assert_eq!(story.timing.typing, Typing::Instant);
+    assert!(!story.timing.badge);
+    let budgets: Vec<_> = story.scenes.iter().map(|s| s.budget).collect();
+    assert_eq!(
+        budgets,
+        [
+            Some(Duration::from_secs(10)),
+            Some(Duration::from_secs(4)),
+            None
+        ]
+    );
+}
+
+#[test]
+fn steps_set_their_own_typing_and_speed() {
+    let story = parse(
+        r#"{ run = "make", typing = "300ms", fast_forward = "8x" },
+           { wait_for = "done", fast_forward = "off" },
+           { terminal = "gh pr list", run = "cat prs.txt", typing = "instant" }"#,
+    )
+    .unwrap();
+    let steps = &story.scenes[0].steps;
+    assert_eq!(
+        steps[0].typing,
+        Some(Typing::Within(Duration::from_millis(300)))
+    );
+    assert_eq!(steps[0].fast_forward, Some(FastForward::Times(8)));
+    assert_eq!(steps[1].fast_forward, Some(FastForward::Off));
+    assert_eq!(steps[2].typing, Some(Typing::Instant));
+}
+
+#[test]
+fn timing_mistakes_are_named() {
+    assert!(error(r#"{ click = "Go", typing = "1s" }"#).contains("`typing` only applies"));
+    assert!(error(r#"{ type = "hi", typing = "1s" }"#).contains("`typing` only applies"));
+    assert!(error(r#"{ run = "make", typing = "fast" }"#).contains("\"instant\""));
+    assert!(error(r#"{ run = "make", typing = "0s" }"#).contains("instant"));
+    assert!(error(r#"{ click = "Go", fast_forward = "8x" }"#).contains("only applies"));
+    assert!(error(r#"{ hold = "5s", fast_forward = "8x" }"#).contains("only applies"));
+    assert!(error(r#"{ run = "make", fast_forward = "64x" }"#).contains("\"32x\""));
+    assert!(error(r#"{ run = "make", fast_forward = "1x" }"#).contains("\"2x\""));
+    assert!(error(r#"{ run = "make", fast_forward = "fast" }"#).contains("fast_forward"));
+    assert!(
+        error(r#"{ run = "top", wait = false, fast_forward = "8x" }, { wait_exit = "top" }"#)
+            .contains("put `fast_forward` on the `wait_exit` step")
+    );
+    let budget = |b: &str| {
+        with_timing(
+            "",
+            &format!("[[scene]]\nbudget = \"{b}\"\nsteps = [{{ run = \"make\" }}]\n"),
+        )
+        .expect_err("rejected")
+    };
+    assert!(budget("500ms").contains("at least 1s"));
+    assert!(budget("soon").contains("scene 1: budget"));
+    let timing = |t: &str| {
+        with_timing(t, "[[scene]]\nsteps = [{ run = \"make\" }]\n").expect_err("rejected")
+    };
+    assert!(timing("[timing]\nbudget = \"200ms\"").contains("timing.budget"));
+    assert!(timing("[timing]\npace = 2").contains("unknown field"));
 }
